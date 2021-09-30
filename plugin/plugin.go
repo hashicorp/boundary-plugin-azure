@@ -333,7 +333,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		// List values matching the filter; ask for provisioning state information
 		// to ensure we are seeing only fully provisioned machines
 		{
-			iter, err := resClient.ListComplete(ctx, filter, constProvisioningState, nil)
+			iter, err := resClient.ListComplete(ctx, filter, "", nil)
 			if err != nil {
 				return nil, fmt.Errorf("error listing resources: %w", err)
 			}
@@ -345,12 +345,8 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 				if val.ID == nil { // something went wrong, likely iterator has advanced beyond the end
 					continue
 				}
-				if val.ProvisioningState == nil {
-					continue
-				}
-				switch *val.ProvisioningState {
-				case string(resources.ProvisioningStateSucceeded):
-				default:
+				if val.Type == nil || *val.Type != "Microsoft.Compute/virtualMachines" {
+					// no point continuing if we can't validate that it's a VM
 					continue
 				}
 				resourceInfos = append(resourceInfos, val)
