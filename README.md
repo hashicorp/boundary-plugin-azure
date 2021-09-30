@@ -73,4 +73,16 @@ The following attributes are valid on an Azure host Set resource:
 
 - `filter` (string): The [Azure Resource Manager (ARM)
   filter](https://docs.microsoft.com/en-us/rest/api/resources/Resources/List)
-  used to select the resources that should be a part of this host set
+  used to select the resources that should be a part of this host set. See
+  Filters below.
+
+## Filters
+
+Azure Resource Manager is used to find matching VMs before their details are
+looked up. There are some limitations with the filtering syntax; specifically,
+when using tags, other types of filters (such as on resource type) are not
+allowed. As a result, it will generally be useful to filter directly on tag
+names or values as in the following examples:
+
+- `tagName eq 'application'`
+- `tagName eq 'application' and tagValue eq 'app2'`
