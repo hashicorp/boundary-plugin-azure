@@ -3,7 +3,7 @@ module github.com/hashicorp/boundary-plugin-host-azure
 go 1.16
 
 require (
-	github.com/Azure/azure-sdk-for-go v57.4.0+incompatible
+	github.com/Azure/azure-sdk-for-go v58.0.0+incompatible
 	github.com/Azure/go-autorest/autorest v0.11.21
 	github.com/Azure/go-autorest/autorest/azure/auth v0.5.8
 	github.com/Azure/go-autorest/autorest/to v0.4.0 // indirect
@@ -11,7 +11,7 @@ require (
 	github.com/hashicorp/boundary/sdk v0.0.11-0.20210928201932-8b1ca4b0b8b9
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.1.1
 	github.com/kr/pretty v0.3.0
-	github.com/manicminer/hamilton v0.30.0
+	github.com/manicminer/hamilton v0.32.0
 	github.com/stretchr/testify v1.7.0
 	google.golang.org/protobuf v1.27.1
 )
