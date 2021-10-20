@@ -8,7 +8,7 @@ require (
 	github.com/Azure/go-autorest/autorest/azure/auth v0.5.8
 	github.com/Azure/go-autorest/autorest/to v0.4.0 // indirect
 	github.com/Azure/go-autorest/autorest/validation v0.3.1 // indirect
-	github.com/hashicorp/boundary/sdk v0.0.11-0.20210928201932-8b1ca4b0b8b9
+	github.com/hashicorp/boundary/sdk v0.0.12-0.20211014161407-f01a8060a066
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.1.1
 	github.com/kr/pretty v0.3.0
 	github.com/manicminer/hamilton v0.32.0
