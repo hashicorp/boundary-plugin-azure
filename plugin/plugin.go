@@ -59,7 +59,7 @@ func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatal
 	secrets := catalog.GetSecrets()
 	if secrets == nil {
 		// Secrets will have to be provided later, on update
-		return nil, nil
+		return &pb.OnCreateCatalogResponse{}, nil
 	}
 
 	sanitizeSecretsFields(secrets)
@@ -110,7 +110,7 @@ func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatal
 		//
 		// TODO: There may be combinations of attributes where those values
 		// changing (or being added) should trigger rotation.
-		return nil, nil
+		return &pb.OnUpdateCatalogResponse{}, nil
 	}
 	sanitizeSecretsFields(secrets)
 
@@ -185,17 +185,17 @@ func (p *AzurePlugin) OnDeleteCatalog(ctx context.Context, req *pb.OnDeleteCatal
 		return nil, errors.New("catalog is nil")
 	}
 	if req.GetPersisted() == nil || req.GetPersisted().GetSecrets() == nil {
-		return nil, nil
+		return &pb.OnDeleteCatalogResponse{}, nil
 	}
 	// Figure out if creds were rotated
 	pdFields := req.GetPersisted().GetSecrets().GetFields()
 	if pdFields == nil {
 		// No data
-		return nil, nil
+		return &pb.OnDeleteCatalogResponse{}, nil
 	}
 	field := pdFields[constCredsLastRotatedTime]
 	if field == nil {
-		return nil, nil
+		return &pb.OnDeleteCatalogResponse{}, nil
 	}
 	// The field existing means it is a string containing the last time it was
 	// rotated. Delete the credential using current creds.
@@ -211,28 +211,13 @@ func (p *AzurePlugin) OnDeleteCatalog(ctx context.Context, req *pb.OnDeleteCatal
 		}
 	}
 
-	return nil, nil
-}
-
-func (p *AzurePlugin) OnCreateSet(ctx context.Context, req *pb.OnCreateSetRequest) (*pb.OnCreateSetResponse, error) {
-	// Nothing yet
-	return nil, nil
-}
-
-func (p *AzurePlugin) OnUpdateSet(ctx context.Context, req *pb.OnUpdateSetRequest) (*pb.OnUpdateSetResponse, error) {
-	// Nothing yet
-	return nil, nil
-}
-
-func (p *AzurePlugin) OnDeleteSet(ctx context.Context, req *pb.OnDeleteSetRequest) (*pb.OnDeleteSetResponse, error) {
-	// Nothing yet
-	return nil, nil
+	return &pb.OnDeleteCatalogResponse{}, nil
 }
 
 func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (*pb.ListHostsResponse, error) {
 	if len(req.GetSets()) == 0 {
 		// Nothing to fetch
-		return nil, nil
+		return &pb.ListHostsResponse{}, nil
 	}
 	catalog := req.GetCatalog()
 	if catalog == nil {
