@@ -51,7 +51,7 @@ func TestOnCreateOnDeleteCatalog(t *testing.T) {
 	ctx := context.Background()
 	p := &AzurePlugin{}
 	hostCatalog, _ := testGetHostStructs(t)
-	objId, initialAuthConfig, initialCred, cleanup := testCreateInitialSecret(t, hostCatalog)
+	initialAuthConfig, initialCred, cleanup := testCreateInitialSecret(t, hostCatalog)
 	defer cleanup()
 
 	// At this point, remove secrets corresponding to those read in by
@@ -106,7 +106,6 @@ func TestOnCreateOnDeleteCatalog(t *testing.T) {
 		_ = removeCredential(
 			ctx,
 			&deferAuthConfig,
-			WithObjectId(objId),
 		)
 	}()
 
@@ -123,8 +122,9 @@ func TestOnCreateOnDeleteCatalog(t *testing.T) {
 	// waitForCreds(t, &waitForCredsAuthConfig, false)
 
 	// Make sure the new creds work, then sleep
-	waitForCredsAuthConfig.SecretId = newPdFields[constSecretId].GetStringValue()
-	waitForCredsAuthConfig.ClientSecret = newPdFields[constSecretValue].GetStringValue()
+	waitForCredsAuthConfig.AuthParams.SecretId = newPdFields[constSecretId].GetStringValue()
+	waitForCredsAuthConfig.AuthParams.SecretValue = newPdFields[constSecretValue].GetStringValue()
+	waitForCredsAuthConfig.HamiltonConfig.ClientSecret = newPdFields[constSecretValue].GetStringValue()
 	waitForCreds(t, &waitForCredsAuthConfig, true)
 	time.Sleep(10 * time.Minute)
 
@@ -139,8 +139,8 @@ func TestOnCreateOnDeleteCatalog(t *testing.T) {
 
 	// Now, use the credentials we got above to revoke this credential we got from OnCreate
 	secrets = wrapMap(t, map[string]interface{}{
-		constSecretValue: waitForCredsAuthConfig.ClientSecret,
-		constSecretId:    waitForCredsAuthConfig.SecretId,
+		constSecretValue: waitForCredsAuthConfig.HamiltonConfig.ClientSecret,
+		constSecretId:    waitForCredsAuthConfig.AuthParams.SecretId,
 	})
 	cdResp, err = p.OnDeleteCatalog(ctx, &pb.OnDeleteCatalogRequest{
 		Catalog: hostCatalog,
@@ -155,7 +155,7 @@ func TestOnCreateOnDeleteCatalog(t *testing.T) {
 	// waitForCreds(t, &waitForCredsAuthConfig, false)
 }
 
-func waitForCreds(t *testing.T, hConfig *WrappedHamiltonConfig, shouldWork bool) auth.Authorizer {
+func waitForCreds(t *testing.T, authzInfo *AuthorizationInfo, shouldWork bool) auth.Authorizer {
 	t.Helper()
 	require := require.New(t)
 	ctx := context.Background()
@@ -164,9 +164,9 @@ func waitForCreds(t *testing.T, hConfig *WrappedHamiltonConfig, shouldWork bool)
 		environments.Global,
 		auth.MsGraph,
 		auth.TokenVersion2,
-		hConfig.TenantID,
-		hConfig.ClientID,
-		hConfig.ClientSecret)
+		authzInfo.AuthParams.TenantId,
+		authzInfo.AuthParams.ClientId,
+		authzInfo.AuthParams.SecretValue)
 	require.NoError(err)
 
 	for {
@@ -230,45 +230,39 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 // leading into a test. This will serve as our "initial secret" for a test. We
 // also return a few cached items. It is expected that the host catalog contains
 // Secrets.
-func testCreateInitialSecret(t *testing.T, hostCatalog *hostcatalogs.HostCatalog) (string, *WrappedHamiltonConfig, *msgraph.PasswordCredential, func()) {
+func testCreateInitialSecret(t *testing.T, hostCatalog *hostcatalogs.HostCatalog) (*AuthorizationInfo, *msgraph.PasswordCredential, func()) {
 	require := require.New(t)
 	ctx := context.Background()
 
 	var initialCred *msgraph.PasswordCredential
-	var objId string // The object ID of the application
 
 	// Set up the data, get the config
-	persistedData := hostCatalog.GetSecrets()
-	authConfig, err := getWrappedHamiltonConfig(hostCatalog, &pb.HostCatalogPersisted{Secrets: persistedData})
-	require.NoError(err)
-
-	// Pre-cache the object ID
-	objId, err = getObjectId(ctx, authConfig, WithClientId(hostCatalog.GetAttributes().GetFields()[constClientId].GetStringValue()))
+	authzInfo, err := getAuthorizationInfo(hostCatalog)
 	require.NoError(err)
 
 	// Get the credential
-	initialCred, err = addCredential(ctx, authConfig, WithObjectId(objId))
+	initialCred, err = addCredential(ctx, authzInfo)
 	require.NoError(err)
 	require.NotNil(initialCred)
 	require.NotNil(initialCred.KeyId)
 	require.NotNil(initialCred.SecretText)
 
-	origAuthConfig := *authConfig
+	origAuthConfig := *authzInfo
+	origAuthConfig.AuthParams.SecretId = *initialCred.KeyId
 	cleanup := func() {
 		if err := removeCredential(
 			ctx,
 			&origAuthConfig,
-			WithObjectId(objId),
-			WithSecretId(*initialCred.KeyId),
 		); err != nil {
 			// It may not exist because it's been rotated
 			require.Contains(err.Error(), "No password credential found with keyId", err.Error())
 		}
 	}
 
-	authConfig.SecretId = *initialCred.KeyId
-	authConfig.ClientSecret = *initialCred.SecretText
-	waitForCreds(t, authConfig, true)
+	authzInfo.AuthParams.SecretId = *initialCred.KeyId
+	authzInfo.AuthParams.SecretValue = *initialCred.SecretText
+	authzInfo.HamiltonConfig.ClientSecret = *initialCred.SecretText
+	waitForCreds(t, authzInfo, true)
 
-	return objId, authConfig, initialCred, cleanup
+	return authzInfo, initialCred, cleanup
 }

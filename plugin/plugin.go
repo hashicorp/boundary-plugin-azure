@@ -9,7 +9,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
-	"github.com/kr/pretty"
+	"github.com/mitchellh/mapstructure"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
@@ -27,11 +27,11 @@ var (
 )
 
 func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
-	authConfig, err := getWrappedHamiltonConfig(catalog, nil)
+	authzInfo, err := getAuthorizationInfo(catalog)
 	if err != nil {
 		return nil, fmt.Errorf("error getting hauth config when creating catalog: %w", err)
 	}
-	newPass, err := rotateCredential(ctx, authConfig)
+	newPass, err := rotateCredential(ctx, authzInfo)
 	if err != nil {
 		return nil, fmt.Errorf("error rotating credentials when creating catalog: %w", err)
 	}
@@ -67,14 +67,12 @@ func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatal
 	// Check if rotation is skipped. Always prefer attempting rotation unless we
 	// explicitly are told not to
 	var skipRotation bool
-	if attrs := catalog.GetAttributes(); attrs != nil {
-		if fields := attrs.GetFields(); fields != nil {
-			if field := fields[constDisableCredentialRotation]; field != nil {
-				if field.GetBoolValue() {
-					skipRotation = true
-				}
-			}
+	if catalog.GetAttributes() != nil {
+		var attrs Attributes
+		if err := mapstructure.Decode(catalog.GetAttributes().AsMap(), &attrs); err != nil {
+			return nil, fmt.Errorf("error decoding catalog attributes: %w", err)
 		}
+		skipRotation = attrs.DisableCredentialRotation
 	}
 	if skipRotation {
 		return &pb.OnCreateCatalogResponse{
@@ -117,13 +115,13 @@ func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatal
 	sanitizeSecretsFields(secrets)
 
 	// If the old credential had been rotated, attempt to delete the old
-	// credential using itself; if it fails, proceed anyways, since in theory
-	// only Boundary knows this value so simply forgetting it is safe enough (if
-	// not clean).
+	// credentials using the new ones; if it fails, proceed anyways, since in
+	// theory only Boundary knows this value so simply forgetting it is safe
+	// enough (if not clean).
 	var field *structpb.Value
 	var pdFields map[string]*structpb.Value
 	var err error
-	var authConfig *WrappedHamiltonConfig
+	var authzInfo *AuthorizationInfo
 
 	persisted := req.GetPersisted()
 	if persisted == nil {
@@ -141,12 +139,13 @@ func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatal
 		goto after_revocation
 	}
 	// If the field exists, it is a timestamp here indicating last rotation time
-	authConfig, err = getWrappedHamiltonConfig(currentCatalog, req.GetPersisted())
+	currentCatalog.Secrets = req.GetPersisted().Secrets
+	authzInfo, err = getAuthorizationInfo(currentCatalog)
 	if err != nil {
 		// TODO: warn in some way?
 		goto after_revocation
 	}
-	if err := removeCredential(ctx, authConfig); err != nil {
+	if err := removeCredential(ctx, authzInfo); err != nil {
 		// TODO: warn
 		goto after_revocation
 	}
@@ -199,14 +198,16 @@ func (p *AzurePlugin) OnDeleteCatalog(ctx context.Context, req *pb.OnDeleteCatal
 		return nil, nil
 	}
 	// The field existing means it is a string containing the last time it was
-	// rotated. Delete the credential using itself.
-	authConfig, err := getWrappedHamiltonConfig(req.GetCatalog(), req.GetPersisted())
+	// rotated. Delete the credential using current creds.
+	catalog := req.GetCatalog()
+	catalog.Secrets = req.GetPersisted().GetSecrets()
+	authzInfo, err := getAuthorizationInfo(catalog)
 	if err != nil {
 		return nil, fmt.Errorf("error getting auth config on catalog deletion: %w", err)
 	}
-	if err := removeCredential(ctx, authConfig); err != nil {
+	if err := removeCredential(ctx, authzInfo); err != nil {
 		if err != nil {
-			return nil, fmt.Errorf("error revoking credential on catalog deletion: %w, authConfig is %s", err, pretty.Sprint(authConfig))
+			return nil, fmt.Errorf("error revoking credential on catalog deletion: %w", err)
 		}
 	}
 
@@ -243,16 +244,17 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	}
 
 	// Create an authorizer
-	var secrets *structpb.Struct
-	if req.GetPersisted() != nil {
-		secrets = req.GetPersisted().GetSecrets()
-	}
-	subscriptionId, authorizer, err := fetchAuthorizer(catalog, secrets)
+	catalog.Secrets = req.GetPersisted().GetSecrets()
+	authzInfo, err := getAuthorizationInfo(catalog)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching subscription id and authorizer: %w", err)
+		return nil, fmt.Errorf("error fetching authorizationInfo: %w", err)
 	}
-	if subscriptionId == "" {
-		return nil, errors.New("subscription id not discovered")
+	if authzInfo == nil {
+		return nil, errors.New("authorization info is nil")
+	}
+	authorizer, err := authzInfo.autorestAuthorizer()
+	if err != nil {
+		return nil, fmt.Errorf("error fetching autorest authorizer: %w", err)
 	}
 	if authorizer == nil {
 		return nil, errors.New("fetched authorizer is nil")
@@ -260,7 +262,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 
 	commonOpts := make([]Option, 0, 3)
 	commonOpts = append(commonOpts,
-		WithSubscriptionId(subscriptionId),
+		WithSubscriptionId(authzInfo.AuthParams.SubscriptionId),
 		WithAuthorizer(authorizer),
 	)
 

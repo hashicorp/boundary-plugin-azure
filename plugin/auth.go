@@ -9,196 +9,167 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
-	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
 	hauth "github.com/manicminer/hamilton/auth"
 	"github.com/manicminer/hamilton/environments"
 	"github.com/manicminer/hamilton/msgraph"
 	"github.com/manicminer/hamilton/odata"
-	"google.golang.org/protobuf/types/known/structpb"
+	"github.com/mitchellh/mapstructure"
 )
 
-type WrappedHamiltonConfig struct {
-	hauth.Config
-	SecretId string
+type AuthorizationInfo struct {
+	HamiltonConfig hauth.Config
+	AuthParams     AuthParams
 }
 
-func authParams(hc *hostcatalogs.HostCatalog, secrets *structpb.Struct) (map[string]string, error) {
+type Attributes struct {
+	SubscriptionId            string `mapstructure:"subscription_id"`
+	ClientId                  string `mapstructure:"client_id"`
+	TenantId                  string `mapstructure:"tenant_id"`
+	DisableCredentialRotation bool   `mapstructure:"disable_credential_rotation"`
+}
+
+type SecretData struct {
+	SecretValue          string `mapstructure:"secret_value"`
+	SecretId             string `mapstructure:"secret_id"`
+	CredsLastRotatedTime string `mapstructure:"creds_last_rotated_time"`
+}
+
+type AuthParams struct {
+	SubscriptionId       string
+	ClientId             string
+	ClientObjectId       string
+	TenantId             string
+	SecretValue          string
+	SecretId             string
+	CredsLastRotatedTime time.Time
+}
+
+func getAuthorizationInfo(hc *hostcatalogs.HostCatalog) (*AuthorizationInfo, error) {
 	if hc == nil {
 		return nil, errors.New("host catalog is nil")
 	}
 	if hc.GetAttributes() == nil {
 		return nil, errors.New("host catalog attributes is nil")
 	}
-	hcFields := hc.GetAttributes().GetFields()
-	if hcFields == nil {
-		return nil, errors.New("host catalog attributes fields is nil")
+	if hc.GetSecrets() == nil {
+		return nil, errors.New("host catalog secret data is nil")
 	}
 
-	if secrets == nil {
-		return nil, errors.New("secrets is nil")
+	hcFields := hc.GetAttributes().AsMap()
+	var attrs Attributes
+	if err := mapstructure.Decode(hcFields, &attrs); err != nil {
+		return nil, fmt.Errorf("error decoding host catalog attribute fields: %w", err)
 	}
-	pdFields := secrets.GetFields()
-	if pdFields == nil {
-		return nil, errors.New("secrets data fields is nil")
+	if attrs.SubscriptionId == "" {
+		return nil, errors.New("subscription id is empty")
 	}
-
-	var subscriptionId string
-	if hcFields[constSubscriptionId] == nil {
-		return nil, errors.New("subscription id not provided in incoming data")
-	}
-	if subscriptionId = hcFields[constSubscriptionId].GetStringValue(); subscriptionId == "" {
-		return nil, errors.New("subscription id could not be read as a string value")
+	if attrs.TenantId == "" {
+		return nil, errors.New("tenant id is empty")
 	}
 
-	ret := map[string]string{
-		constSubscriptionId: subscriptionId,
+	pdFields := hc.GetSecrets().AsMap()
+	var secrets SecretData
+	if err := mapstructure.Decode(pdFields, &secrets); err != nil {
+		return nil, fmt.Errorf("error decoding host catalog persisted data fields: %w", err)
 	}
-
-	clientId := hcFields[constClientId]
-	secretValue := pdFields[constSecretValue]
-	secretId := pdFields[constSecretId]
-	tenantId := hcFields[constTenantId]
-
-	switch {
-	case clientId != nil && clientId.GetStringValue() != "" &&
-		secretValue != nil && secretValue.GetStringValue() != "" &&
-		tenantId != nil && tenantId.GetStringValue() != "":
-		ret[constClientId] = clientId.GetStringValue()
-		ret[constSecretValue] = secretValue.GetStringValue()
-		ret[constTenantId] = tenantId.GetStringValue()
-		if secretId != nil {
-			ret[constSecretId] = secretId.GetStringValue()
-		}
+	if secrets.SecretValue == "" {
+		return nil, errors.New("secret value is empty")
 	}
-
-	return ret, nil
-}
-
-func fetchAuthorizer(hc *hostcatalogs.HostCatalog, secrets *structpb.Struct) (string, autorest.Authorizer, error) {
-	aParams, err := authParams(hc, secrets)
-	if err != nil {
-		return "", nil, fmt.Errorf("error finding authentication params: %w", err)
-	}
-
-	var authorizer autorest.Authorizer
-	// Switch between currently-understood authorization types
-	{
-		switch {
-		case aParams[constClientId] != "" &&
-			aParams[constSecretValue] != "" &&
-			aParams[constTenantId] != "":
-			credsConfig := auth.NewClientCredentialsConfig(
-				aParams[constClientId],
-				aParams[constSecretValue],
-				aParams[constTenantId],
-			)
-			authorizer, err = credsConfig.Authorizer()
-			if err != nil {
-				return "", nil, fmt.Errorf("error authorizing to Azure: %w", err)
-			}
-
-		default:
-			return "", nil, errors.New("no or incomplete authentication information available")
-		}
-
-		if authorizer == nil {
-			return "", nil, fmt.Errorf("authorizer after authorizing to Azure is nil")
-		}
-	}
-
-	return aParams[constSubscriptionId], authorizer, nil
-}
-
-func getWrappedHamiltonConfig(hc *hostcatalogs.HostCatalog, persisted *pb.HostCatalogPersisted) (*WrappedHamiltonConfig, error) {
-	secrets := hc.GetSecrets()
-	if secrets == nil && persisted != nil {
-		secrets = persisted.GetSecrets()
-	}
-	aParams, err := authParams(hc, secrets)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching authentication params when fetching: %w", err)
-	}
-	authConfig := &WrappedHamiltonConfig{}
-	authConfig.Environment = environments.Global
-
-	switch {
-	case aParams[constClientId] != "" &&
-		aParams[constSecretValue] != "" &&
-		aParams[constTenantId] != "":
-		authConfig.TenantID = aParams[constTenantId]
-		authConfig.ClientID = aParams[constClientId]
-		authConfig.ClientSecret = aParams[constSecretValue]
-		if aParams[constSecretId] != "" {
-			authConfig.SecretId = aParams[constSecretId]
-		}
-		authConfig.EnableClientSecretAuth = true
-
-	default:
-		return nil, errors.New("no or incomplete authentication information available")
-	}
-
-	return authConfig, nil
-}
-
-func getObjectId(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...Option) (string, error) {
-	opts, err := getOpts(opt...)
-	if err != nil {
-		return "", fmt.Errorf("error parsing ops: %w", err)
-	}
-
-	objId := opts.withObjectId
-	if objId == "" {
-		clientId := opts.withClientId
-		if clientId == "" && hConfig != nil {
-			clientId = hConfig.ClientID
-		}
-		if clientId == "" {
-			return "", fmt.Errorf("neither client id nor object id passed in, cannot continue")
-		}
-		// First, find the appId
-		aClient, err := getApplicationsClient(ctx, hConfig)
+	var lastRotatedTime time.Time
+	var err error
+	if secrets.CredsLastRotatedTime != "" {
+		lastRotatedTime, err = time.Parse(time.RFC3339Nano, secrets.CredsLastRotatedTime)
 		if err != nil {
-			return "", fmt.Errorf("error getting application client: %w", err)
+			return nil, fmt.Errorf("error parsing last rotated time: %w", err)
 		}
-		if aClient == nil {
-			return "", errors.New("applications client is nil when getting object id")
-		}
-		apps, _, err := aClient.List(ctx, odata.Query{
-			Filter: fmt.Sprintf("appId eq '%s'", clientId),
-		})
-		if err != nil {
-			return "", fmt.Errorf("error listing applications to find objId: %w", err)
-		}
-		if apps == nil {
-			return "", errors.New("nil apps returned when listing to find objId")
-		}
-		if len(*apps) != 1 {
-			return "", fmt.Errorf("unexpected number of apps found, expected 1, found %d", len(*apps))
-		}
-		objId = *(*apps)[0].DirectoryObject.ID
 	}
-	return objId, nil
+
+	return &AuthorizationInfo{
+		HamiltonConfig: hauth.Config{
+			Environment:            environments.Global,
+			TenantID:               attrs.TenantId,
+			ClientID:               attrs.ClientId,
+			ClientSecret:           secrets.SecretValue,
+			EnableClientSecretAuth: true,
+		},
+		AuthParams: AuthParams{
+			SubscriptionId:       attrs.SubscriptionId,
+			ClientId:             attrs.ClientId,
+			TenantId:             attrs.TenantId,
+			SecretId:             secrets.SecretId,
+			SecretValue:          secrets.SecretValue,
+			CredsLastRotatedTime: lastRotatedTime,
+		},
+	}, nil
+}
+
+func (a *AuthorizationInfo) autorestAuthorizer() (autorest.Authorizer, error) {
+	credsConfig := auth.NewClientCredentialsConfig(
+		a.AuthParams.ClientId,
+		a.AuthParams.SecretValue,
+		a.AuthParams.TenantId,
+	)
+	authorizer, err := credsConfig.Authorizer()
+	if err != nil {
+		return nil, fmt.Errorf("error authorizing to Azure: %w", err)
+	}
+	if authorizer == nil {
+		return nil, errors.New("generated authorizer is nil")
+	}
+	return authorizer, nil
+}
+
+func (a *AuthorizationInfo) populateObjectId(ctx context.Context, opt ...Option) error {
+	if a.AuthParams.ClientObjectId != "" {
+		return nil
+	}
+
+	if a.AuthParams.ClientId == "" {
+		return errors.New("client id not known at object id lookup time")
+	}
+	// First, find the appId
+	aClient, err := getApplicationsClient(ctx, a)
+	if err != nil {
+		return fmt.Errorf("error getting application client: %w", err)
+	}
+	if aClient == nil {
+		return errors.New("applications client is nil when getting object id")
+	}
+	apps, _, err := aClient.List(ctx, odata.Query{
+		Filter: fmt.Sprintf("appId eq '%s'", a.AuthParams.ClientId),
+	})
+	if err != nil {
+		return fmt.Errorf("error listing applications to find objId: %w", err)
+	}
+	if apps == nil {
+		return errors.New("nil apps returned when listing to find objId")
+	}
+	if len(*apps) != 1 {
+		return fmt.Errorf("unexpected number of apps found, expected 1, found %d", len(*apps))
+	}
+	a.AuthParams.ClientObjectId = *(*apps)[0].DirectoryObject.ID
+
+	return nil
 }
 
 // rotateCredentials creates a new password, then uses a client with that new
 // password to revoke the old.
 //
 // NOTE: the underlying auth config will be modified to use the new credentials!
-func rotateCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...Option) (*msgraph.PasswordCredential, error) {
-	if hConfig == nil {
-		return nil, errors.New("empty auth config id")
+func rotateCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) (*msgraph.PasswordCredential, error) {
+	if authzInfo == nil {
+		return nil, errors.New("empty authz info")
 	}
-	if hConfig.SecretId == "" {
+	if authzInfo.AuthParams.SecretId == "" {
 		return nil, errors.New("missing original secret id")
 	}
 
-	// Get the object ID here so we don't have to look it up twice
-	objId, err := getObjectId(ctx, hConfig)
-	if err != nil {
+	// Ensure the object ID is set
+	if err := authzInfo.populateObjectId(ctx); err != nil {
 		return nil, fmt.Errorf("error fetching object id: %w", err)
 	}
 
-	newCred, err := addCredential(ctx, hConfig, WithObjectId(objId))
+	newCred, err := addCredential(ctx, authzInfo)
 	if err != nil {
 		return nil, fmt.Errorf("error adding password: %w", err)
 	}
@@ -209,19 +180,23 @@ func rotateCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt .
 		return nil, errors.New("new credential secret text is nil after adding")
 	}
 
-	if err := removeCredential(ctx, hConfig, WithObjectId(objId)); err != nil {
+	if err := removeCredential(ctx, authzInfo); err != nil {
 		return nil, fmt.Errorf("error removing previous credential: %w", err)
 	}
 	return newCred, nil
 }
 
-func addCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...Option) (*msgraph.PasswordCredential, error) {
-	objId, err := getObjectId(ctx, hConfig, opt...)
-	if err != nil {
+func addCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) (*msgraph.PasswordCredential, error) {
+	if authzInfo == nil {
+		return nil, errors.New("empty authz info")
+	}
+
+	// Ensure the object ID is set
+	if err := authzInfo.populateObjectId(ctx); err != nil {
 		return nil, fmt.Errorf("error fetching object id: %w", err)
 	}
 
-	aClient, err := getApplicationsClient(ctx, hConfig)
+	aClient, err := getApplicationsClient(ctx, authzInfo)
 	if err != nil {
 		return nil, fmt.Errorf("error getting application client: %w", err)
 	}
@@ -231,7 +206,7 @@ func addCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...O
 
 	// Create the new password
 	displayName := fmt.Sprintf("boundary-rotated-%s", time.Now().Format(time.RFC3339))
-	newPass, _, err := aClient.AddPassword(ctx, objId, msgraph.PasswordCredential{
+	newPass, _, err := aClient.AddPassword(ctx, authzInfo.AuthParams.ClientObjectId, msgraph.PasswordCredential{
 		DisplayName: &displayName,
 	})
 	if err != nil {
@@ -250,9 +225,9 @@ func addCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...O
 	return newPass, nil
 }
 
-func removeCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt ...Option) error {
-	objId, err := getObjectId(ctx, hConfig, opt...)
-	if err != nil {
+func removeCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) error {
+	// Ensure the object ID is set
+	if err := authzInfo.populateObjectId(ctx); err != nil {
 		return fmt.Errorf("error fetching object id: %w", err)
 	}
 
@@ -261,12 +236,12 @@ func removeCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt .
 		return fmt.Errorf("error parsing ops: %w", err)
 	}
 
-	secretId := hConfig.SecretId
+	secretId := authzInfo.AuthParams.SecretId
 	if opts.withSecretId != "" {
 		secretId = opts.withSecretId
 	}
 
-	aClient, err := getApplicationsClient(ctx, hConfig)
+	aClient, err := getApplicationsClient(ctx, authzInfo)
 	if err != nil {
 		return fmt.Errorf("error getting application client: %w", err)
 	}
@@ -274,7 +249,7 @@ func removeCredential(ctx context.Context, hConfig *WrappedHamiltonConfig, opt .
 		return errors.New("applications client is nil when removing credential")
 	}
 
-	_, err = aClient.RemovePassword(ctx, objId, secretId)
+	_, err = aClient.RemovePassword(ctx, authzInfo.AuthParams.ClientObjectId, secretId)
 	if err != nil {
 		return fmt.Errorf("error removing old password: %w", err)
 	}

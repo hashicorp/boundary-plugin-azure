@@ -26,16 +26,15 @@ type Option func(*options) error
 
 // options = how options are represented
 type options struct {
-	withHostCatalogAttrs      *structpb.Struct
-	withPersistedData         *structpb.Struct
-	withSubscriptionId        string
-	withAuthorizer            autorest.Authorizer
-	withUserAgent             string
-	withBaseUrl               string
-	withWrappedHamiltonConfig *WrappedHamiltonConfig
-	withClientId              string
-	withObjectId              string
-	withSecretId              string
+	withHostCatalogAttrs  *structpb.Struct
+	withPersistedData     *structpb.Struct
+	withSubscriptionId    string
+	withAuthorizer        autorest.Authorizer
+	withUserAgent         string
+	withBaseUrl           string
+	withAuthorizationInfo *AuthorizationInfo
+	withClientId          string
+	withSecretId          string
 }
 
 func getDefaultOptions() options {
@@ -100,10 +99,10 @@ func WithBaseUrl(with string) Option {
 	}
 }
 
-// WithWrappedHamiltonConfig contains the hamilton package authentication config to use
-func WithWrappedHamiltonConfig(with *WrappedHamiltonConfig) Option {
+// WithAuthorizationInfo contains the authorization information to use
+func WithAuthorizationInfo(with *AuthorizationInfo) Option {
 	return func(o *options) error {
-		o.withWrappedHamiltonConfig = with
+		o.withAuthorizationInfo = with
 		return nil
 	}
 }
@@ -112,14 +111,6 @@ func WithWrappedHamiltonConfig(with *WrappedHamiltonConfig) Option {
 func WithClientId(with string) Option {
 	return func(o *options) error {
 		o.withClientId = with
-		return nil
-	}
-}
-
-// WithObjectId contains the object ID to use
-func WithObjectId(with string) Option {
-	return func(o *options) error {
-		o.withObjectId = with
 		return nil
 	}
 }

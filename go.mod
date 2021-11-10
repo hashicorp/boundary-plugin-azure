@@ -12,6 +12,7 @@ require (
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.1.1
 	github.com/kr/pretty v0.3.0
 	github.com/manicminer/hamilton v0.32.0
+	github.com/mitchellh/mapstructure v1.4.1
 	github.com/stretchr/testify v1.7.0
 	google.golang.org/protobuf v1.27.1
 )

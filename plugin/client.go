@@ -112,20 +112,17 @@ func getPublicIpAddressesClient(opt ...Option) (*network.PublicIPAddressesClient
 	return &client, nil
 }
 
-func getApplicationsClient(ctx context.Context, authConfig *WrappedHamiltonConfig) (*msgraph.ApplicationsClient, error) {
-	if authConfig == nil {
+func getApplicationsClient(ctx context.Context, authzInfo *AuthorizationInfo) (*msgraph.ApplicationsClient, error) {
+	if authzInfo == nil {
 		return nil, errors.New("empty auth config id when fetching service principals client")
 	}
-	if authConfig.TenantID == "" {
-		return nil, errors.New("empty tenant id in auth config when fetching service principals client")
-	}
 
-	authorizer, err := authConfig.NewAuthorizer(ctx, hauth.MsGraph)
+	authorizer, err := authzInfo.HamiltonConfig.NewAuthorizer(ctx, hauth.MsGraph)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching hauth authorizer when fetching service principals client: %w", err)
 	}
 
-	client := msgraph.NewApplicationsClient(authConfig.TenantID)
+	client := msgraph.NewApplicationsClient(authzInfo.AuthParams.TenantId)
 	client.BaseClient.Authorizer = authorizer
 
 	return client, nil
