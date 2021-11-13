@@ -6,7 +6,7 @@ require (
 	github.com/Azure/azure-sdk-for-go v59.2.0+incompatible
 	github.com/Azure/go-autorest/autorest v0.11.22
 	github.com/Azure/go-autorest/autorest/azure/auth v0.5.9
-	github.com/hashicorp/boundary/sdk v0.0.12-0.20211110201157-962c9463fdb3
+	github.com/hashicorp/boundary/sdk v0.0.12-0.20211112235128-46a1edcb3b7b
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.1.2
 	github.com/kr/pretty v0.3.0
 	github.com/manicminer/hamilton v0.33.0
@@ -30,7 +30,7 @@ require (
 	github.com/form3tech-oss/jwt-go v3.2.2+incompatible // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
-	github.com/hashicorp/eventlogger v0.1.1-0.20211104100552-e1e801e50144 // indirect
+	github.com/hashicorp/eventlogger v0.1.1-0.20211106154408-4ff8da3a890c // indirect
 	github.com/hashicorp/eventlogger/filters/encrypt v0.1.6-0.20211027211326-5db60a48f239 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-hclog v0.16.2 // indirect
