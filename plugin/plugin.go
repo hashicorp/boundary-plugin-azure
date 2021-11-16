@@ -403,12 +403,20 @@ func validateSecrets(s *structpb.Struct) error {
 	return nil
 }
 
+var allowedFields = map[string]struct{}{
+	constDisableCredentialRotation: {},
+	constSubscriptionId:            {},
+	constTenantId:                  {},
+	constClientId:                  {},
+}
+
 func validateCatalog(catalog *hostcatalogs.HostCatalog) error {
 	if catalog == nil {
 		return status.Error(codes.InvalidArgument, "catalog is nil")
 	}
 	var attrs Attributes
-	if err := mapstructure.Decode(catalog.GetAttributes().AsMap(), &attrs); err != nil {
+	attrMap := catalog.GetAttributes().AsMap()
+	if err := mapstructure.Decode(attrMap, &attrs); err != nil {
 		return status.Errorf(codes.InvalidArgument, "error decoding catalog attributes: %s", err)
 	}
 	badFields := make(map[string]string)
@@ -423,6 +431,12 @@ func validateCatalog(catalog *hostcatalogs.HostCatalog) error {
 	}
 	if len(attrs.TenantId) == 0 {
 		badFields["attributes.tenant_id"] = "This is a required field."
+	}
+
+	for f := range attrMap {
+		if _, ok := allowedFields[f]; !ok {
+			badFields[fmt.Sprintf("attributes.%s", f)] = "Unrecognized field."
+		}
 	}
 
 	if len(badFields) > 0 {

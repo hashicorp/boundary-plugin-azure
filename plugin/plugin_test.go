@@ -100,6 +100,17 @@ func TestValidateCatalog(t *testing.T) {
 			}),
 			wantError: true,
 		},
+		{
+			name: "unrecognized field",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: true,
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+				"unrecognized":                 "unrecognized",
+			}),
+			wantError: true,
+		},
 	}
 
 	for _, tc := range cases {
