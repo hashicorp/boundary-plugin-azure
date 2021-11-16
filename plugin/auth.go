@@ -45,13 +45,12 @@ type AuthParams struct {
 }
 
 func getAuthorizationInfo(hc *hostcatalogs.HostCatalog) (*AuthorizationInfo, error) {
-	if hc == nil {
+	switch {
+	case hc == nil:
 		return nil, errors.New("host catalog is nil")
-	}
-	if hc.GetAttributes() == nil {
+	case hc.GetAttributes() == nil:
 		return nil, errors.New("host catalog attributes is nil")
-	}
-	if hc.GetSecrets() == nil {
+	case hc.GetSecrets() == nil:
 		return nil, errors.New("host catalog secret data is nil")
 	}
 
@@ -154,8 +153,6 @@ func (a *AuthorizationInfo) populateObjectId(ctx context.Context, opt ...Option)
 
 // rotateCredentials creates a new password, then uses a client with that new
 // password to revoke the old.
-//
-// NOTE: the underlying auth config will be modified to use the new credentials!
 func rotateCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) (*msgraph.PasswordCredential, error) {
 	if authzInfo == nil {
 		return nil, errors.New("empty authz info")

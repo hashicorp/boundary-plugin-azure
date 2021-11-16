@@ -15,6 +15,7 @@ import (
 	"github.com/manicminer/hamilton/auth"
 	"github.com/manicminer/hamilton/environments"
 	"github.com/manicminer/hamilton/msgraph"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -46,113 +47,248 @@ func TestListHosts(t *testing.T) {
 	pretty.Println(lhResp.GetHosts())
 }
 
-func TestOnCreateOnDeleteCatalog(t *testing.T) {
-	require := require.New(t)
+func TestValidateCatalog(t *testing.T) {
+	cases := []struct {
+		name         string
+		catalogAttrs *structpb.Struct
+		wantError    bool
+	}{
+		{
+			name: "success",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: true,
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+			}),
+		},
+		{
+			name:         "nil",
+			catalogAttrs: nil,
+			wantError:    true,
+		},
+		{
+			name: "rotation enabled",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: false,
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+			}),
+			wantError: true,
+		},
+		{
+			name: "no client id",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: true,
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+			}),
+			wantError: true,
+		},
+		{
+			name: "no tenant id",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: false,
+				constClientId:                  "client_id",
+				constSubscriptionId:            "sub_id",
+			}),
+			wantError: true,
+		},
+		{
+			name: "no subscription id",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: false,
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+			}),
+			wantError: true,
+		},
+		{
+			name: "unrecognized field",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: true,
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+				"unrecognized":                 "unrecognized",
+			}),
+			wantError: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateCatalog(&hostcatalogs.HostCatalog{
+				Attributes: tc.catalogAttrs,
+			})
+			if tc.wantError {
+				assert.Error(t, got)
+			} else {
+				assert.NoError(t, got)
+			}
+		})
+	}
+}
+
+func TestValidateSecrets(t *testing.T) {
+	cases := []struct {
+		name           string
+		catalogSecrets *structpb.Struct
+		wantError      bool
+	}{
+		{
+			name: "success",
+			catalogSecrets: wrapMap(t, map[string]interface{}{
+				constSecretValue: "value",
+				constSecretId:    "secret_id",
+			}),
+		},
+		{
+			name:           "nil secret value",
+			catalogSecrets: nil,
+			wantError:      true,
+		},
+		{
+			name: "no secret value",
+			catalogSecrets: wrapMap(t, map[string]interface{}{
+				constSecretId: "secret_id",
+			}),
+			wantError: true,
+		},
+		{
+			name: "secret with last rotated time",
+			catalogSecrets: wrapMap(t, map[string]interface{}{
+				constSecretValue:          "value",
+				constCredsLastRotatedTime: "something",
+			}),
+			wantError: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateSecrets(tc.catalogSecrets)
+			if tc.wantError {
+				assert.Error(t, got)
+			} else {
+				assert.NoError(t, got)
+			}
+		})
+	}
+}
+
+func TestCreateCatalog(t *testing.T) {
 	ctx := context.Background()
 	p := &AzurePlugin{}
-	hostCatalog, _ := testGetHostStructs(t)
-	initialAuthConfig, initialCred, cleanup := testCreateInitialSecret(t, hostCatalog)
-	defer cleanup()
-
-	// At this point, remove secrets corresponding to those read in by
-	// testGetHostCatalog as they're our permanent ones
-	hostCatalog.Secrets = nil
-
-	// Give some time -- a lot -- for token to become active
-	time.Sleep(10 * time.Minute)
-
-	// Now, we'll use this credential to simulate creating a host catalog, which
-	// will rotate it. First, ensure we don't error out if creds aren't provided
-	// _yet_ (instead, on update)
-	ccResp, err := p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{
-		Catalog: hostCatalog,
+	attrs := wrapMap(t, map[string]interface{}{
+		constDisableCredentialRotation: true,
+		constClientId:                  "client_id",
+		constTenantId:                  "tenant_id",
+		constSubscriptionId:            "sub_id",
 	})
-	require.NoError(err)
-	require.Nil(ccResp)
-
-	// Now run the same thing with rotation disabled, make sure we get the same
-	// values back
 	secrets := wrapMap(t, map[string]interface{}{
-		constSecretValue: *initialCred.SecretText,
-		constSecretId:    *initialCred.KeyId,
-	})
-	hostCatalog.Secrets = secrets
-	hostCatalog.GetAttributes().GetFields()[constDisableCredentialRotation] = structpb.NewBoolValue(true)
-	ccResp, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{
-		Catalog: hostCatalog,
-	})
-	require.NoError(err)
-	require.NotNil(ccResp)
-	require.NotNil(ccResp.GetPersisted())
-	require.NotNil(ccResp.GetPersisted().GetSecrets())
-	newPdFields := ccResp.GetPersisted().GetSecrets().GetFields()
-	require.Equal(*initialCred.KeyId, newPdFields[constSecretId].GetStringValue())
-	require.Equal(*initialCred.SecretText, newPdFields[constSecretValue].GetStringValue())
-
-	// Now we'll try again, actually rotating the creds
-	delete(hostCatalog.GetAttributes().GetFields(), constDisableCredentialRotation)
-	ccResp, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{
-		Catalog: hostCatalog,
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
 	})
 
-	require.NoError(err)
-	require.NotNil(ccResp)
-	require.NotNil(ccResp.GetPersisted())
-	require.NotNil(ccResp.GetPersisted().GetSecrets())
-	newPdFields = ccResp.GetPersisted().GetSecrets().GetFields()
-	// Use old creds for this removal to give it a high likelihood of success
-	deferAuthConfig := *initialAuthConfig
-	defer func() {
-		_ = removeCredential(
-			ctx,
-			&deferAuthConfig,
-		)
-	}()
+	res, err := p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secrets,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
 
-	// Best-effort ensure that this new cred is deleted if OnDelete doesn't work right
-	require.NotEqual(*initialCred.KeyId, newPdFields[constSecretId].GetStringValue())
-	require.NotEqual(*initialCred.SecretText, newPdFields[constSecretValue].GetStringValue())
-
-	// Remove these now prior to OnDelete
-	hostCatalog.Secrets = nil
-
-	// Make sure old creds don't work
-	waitForCredsAuthConfig := *initialAuthConfig
-	// FIXME: Actually don't, because they can still be used for up to a day!??! later?!?!
-	// waitForCreds(t, &waitForCredsAuthConfig, false)
-
-	// Make sure the new creds work, then sleep
-	waitForCredsAuthConfig.AuthParams.SecretId = newPdFields[constSecretId].GetStringValue()
-	waitForCredsAuthConfig.AuthParams.SecretValue = newPdFields[constSecretValue].GetStringValue()
-	waitForCredsAuthConfig.HamiltonConfig.ClientSecret = newPdFields[constSecretValue].GetStringValue()
-	waitForCreds(t, &waitForCredsAuthConfig, true)
-	time.Sleep(10 * time.Minute)
-
-	// Now, let's test OnDelete. First, check the case where we never configured
-	// a credential in the first place.
-	cdResp, err := p.OnDeleteCatalog(ctx, &pb.OnDeleteCatalogRequest{
-		Catalog:   hostCatalog,
-		Persisted: &pb.HostCatalogPersisted{},
+	secretsWithExtra := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+		"extraField":     "extra_value",
 	})
-	require.NoError(err)
-	require.Nil(cdResp)
+	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secretsWithExtra,
+	}})
+	require.NoError(t, err)
+	// still only persist the fields we care about.
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
 
-	// Now, use the credentials we got above to revoke this credential we got from OnCreate
-	secrets = wrapMap(t, map[string]interface{}{
-		constSecretValue: waitForCredsAuthConfig.HamiltonConfig.ClientSecret,
-		constSecretId:    waitForCredsAuthConfig.AuthParams.SecretId,
+	secretsWithRotationTime := wrapMap(t, map[string]interface{}{
+		constSecretValue:          "secret_value",
+		constSecretId:             "secret_id",
+		constCredsLastRotatedTime: "something",
 	})
-	cdResp, err = p.OnDeleteCatalog(ctx, &pb.OnDeleteCatalogRequest{
-		Catalog: hostCatalog,
-		Persisted: &pb.HostCatalogPersisted{
-			Secrets: secrets,
-		},
+	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secretsWithRotationTime,
+	}})
+	assert.Error(t, err)
+}
+
+func TestUpdateCatalog(t *testing.T) {
+	ctx := context.Background()
+	p := &AzurePlugin{}
+
+	oldCatalog := &hostcatalogs.HostCatalog{
+		Attributes: wrapMap(t, map[string]interface{}{
+			constDisableCredentialRotation: true,
+			constClientId:                  "foo",
+			constTenantId:                  "foo",
+			constSubscriptionId:            "foo",
+		}),
+	}
+
+	attrs := wrapMap(t, map[string]interface{}{
+		constDisableCredentialRotation: true,
+		constClientId:                  "client_id",
+		constTenantId:                  "tenant_id",
+		constSubscriptionId:            "sub_id",
 	})
-	require.NoError(err)
-	require.Nil(cdResp)
-	// Make sure the creds no longer work
-	// FIXME: Don't, for the same reason
-	// waitForCreds(t, &waitForCredsAuthConfig, false)
+
+	res, err := p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+		}})
+	require.NoError(t, err)
+	assert.Nil(t, res.GetPersisted())
+
+	secrets := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+	})
+
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secrets,
+		}})
+	require.NoError(t, err)
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithExtra := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+		"extraField":     "extra_value",
+	})
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secretsWithExtra,
+		}})
+	require.NoError(t, err)
+	// still only persist the fields we care about.
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithRotationTime := wrapMap(t, map[string]interface{}{
+		constSecretValue:          "secret_value",
+		constSecretId:             "secret_id",
+		constCredsLastRotatedTime: "something",
+	})
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secretsWithRotationTime,
+		}})
+	assert.Error(t, err)
 }
 
 func waitForCreds(t *testing.T, authzInfo *AuthorizationInfo, shouldWork bool) auth.Authorizer {
