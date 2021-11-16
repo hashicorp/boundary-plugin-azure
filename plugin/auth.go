@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
 	hauth "github.com/manicminer/hamilton/auth"
 	"github.com/manicminer/hamilton/environments"
-	"github.com/manicminer/hamilton/msgraph"
 	"github.com/manicminer/hamilton/odata"
 	"github.com/mitchellh/mapstructure"
 )
@@ -21,6 +20,7 @@ type AuthorizationInfo struct {
 	AuthParams     AuthParams
 }
 
+// The allowed attribute fields from the controller to this plugin
 type Attributes struct {
 	SubscriptionId            string `mapstructure:"subscription_id"`
 	ClientId                  string `mapstructure:"client_id"`
@@ -28,6 +28,7 @@ type Attributes struct {
 	DisableCredentialRotation bool   `mapstructure:"disable_credential_rotation"`
 }
 
+// The allowed secret fields passed in from the controller to this plugin
 type SecretData struct {
 	SecretValue          string `mapstructure:"secret_value"`
 	SecretId             string `mapstructure:"secret_id"`
@@ -35,23 +36,23 @@ type SecretData struct {
 }
 
 type AuthParams struct {
-	SubscriptionId       string
-	ClientId             string
-	ClientObjectId       string
-	TenantId             string
+	SubscriptionId string
+	ClientId       string
+	ClientObjectId string
+	TenantId       string
+
 	SecretValue          string
 	SecretId             string
 	CredsLastRotatedTime time.Time
 }
 
 func getAuthorizationInfo(hc *hostcatalogs.HostCatalog) (*AuthorizationInfo, error) {
-	if hc == nil {
+	switch {
+	case hc == nil:
 		return nil, errors.New("host catalog is nil")
-	}
-	if hc.GetAttributes() == nil {
+	case hc.GetAttributes() == nil:
 		return nil, errors.New("host catalog attributes is nil")
-	}
-	if hc.GetSecrets() == nil {
+	case hc.GetSecrets() == nil:
 		return nil, errors.New("host catalog secret data is nil")
 	}
 
@@ -119,7 +120,7 @@ func (a *AuthorizationInfo) autorestAuthorizer() (autorest.Authorizer, error) {
 	return authorizer, nil
 }
 
-func (a *AuthorizationInfo) populateObjectId(ctx context.Context, opt ...Option) error {
+func (a *AuthorizationInfo) populateObjectId(ctx context.Context, _ ...Option) error {
 	if a.AuthParams.ClientObjectId != "" {
 		return nil
 	}
@@ -148,111 +149,6 @@ func (a *AuthorizationInfo) populateObjectId(ctx context.Context, opt ...Option)
 		return fmt.Errorf("unexpected number of apps found, expected 1, found %d", len(*apps))
 	}
 	a.AuthParams.ClientObjectId = *(*apps)[0].DirectoryObject.ID
-
-	return nil
-}
-
-// rotateCredentials creates a new password, then uses a client with that new
-// password to revoke the old.
-//
-// NOTE: the underlying auth config will be modified to use the new credentials!
-func rotateCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) (*msgraph.PasswordCredential, error) {
-	if authzInfo == nil {
-		return nil, errors.New("empty authz info")
-	}
-	if authzInfo.AuthParams.SecretId == "" {
-		return nil, errors.New("missing original secret id")
-	}
-
-	// Ensure the object ID is set
-	if err := authzInfo.populateObjectId(ctx); err != nil {
-		return nil, fmt.Errorf("error fetching object id: %w", err)
-	}
-
-	newCred, err := addCredential(ctx, authzInfo)
-	if err != nil {
-		return nil, fmt.Errorf("error adding password: %w", err)
-	}
-	if newCred == nil {
-		return nil, errors.New("new credential is nil after adding")
-	}
-	if newCred.SecretText == nil {
-		return nil, errors.New("new credential secret text is nil after adding")
-	}
-
-	if err := removeCredential(ctx, authzInfo); err != nil {
-		return nil, fmt.Errorf("error removing previous credential: %w", err)
-	}
-	return newCred, nil
-}
-
-func addCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) (*msgraph.PasswordCredential, error) {
-	if authzInfo == nil {
-		return nil, errors.New("empty authz info")
-	}
-
-	// Ensure the object ID is set
-	if err := authzInfo.populateObjectId(ctx); err != nil {
-		return nil, fmt.Errorf("error fetching object id: %w", err)
-	}
-
-	aClient, err := getApplicationsClient(ctx, authzInfo)
-	if err != nil {
-		return nil, fmt.Errorf("error getting application client: %w", err)
-	}
-	if aClient == nil {
-		return nil, errors.New("applications client is nil when adding credential")
-	}
-
-	// Create the new password
-	displayName := fmt.Sprintf("boundary-rotated-%s", time.Now().Format(time.RFC3339))
-	newPass, _, err := aClient.AddPassword(ctx, authzInfo.AuthParams.ClientObjectId, msgraph.PasswordCredential{
-		DisplayName: &displayName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error creating new password: %w", err)
-	}
-	if newPass == nil {
-		return nil, errors.New("nil new password returned")
-	}
-	if newPass.KeyId == nil {
-		return nil, errors.New("nil key ID for new password")
-	}
-	if newPass.SecretText == nil {
-		return nil, errors.New("nil secret text for new password")
-	}
-
-	return newPass, nil
-}
-
-func removeCredential(ctx context.Context, authzInfo *AuthorizationInfo, opt ...Option) error {
-	// Ensure the object ID is set
-	if err := authzInfo.populateObjectId(ctx); err != nil {
-		return fmt.Errorf("error fetching object id: %w", err)
-	}
-
-	opts, err := getOpts(opt...)
-	if err != nil {
-		return fmt.Errorf("error parsing ops: %w", err)
-	}
-
-	secretId := authzInfo.AuthParams.SecretId
-	if opts.withSecretId != "" {
-		secretId = opts.withSecretId
-	}
-
-	aClient, err := getApplicationsClient(ctx, authzInfo)
-	if err != nil {
-		return fmt.Errorf("error getting application client: %w", err)
-	}
-	if aClient == nil {
-		return errors.New("applications client is nil when removing credential")
-	}
-
-	_, err = aClient.RemovePassword(ctx, authzInfo.AuthParams.ClientObjectId, secretId)
-	if err != nil {
-		return fmt.Errorf("error removing old password: %w", err)
-	}
 
 	return nil
 }

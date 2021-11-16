@@ -5,14 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
+	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
 	"github.com/mitchellh/mapstructure"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
 	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
 )
 
@@ -26,192 +27,70 @@ var (
 	_ pb.HostPluginServiceServer = (*AzurePlugin)(nil)
 )
 
-func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
-	authzInfo, err := getAuthorizationInfo(catalog)
-	if err != nil {
-		return nil, fmt.Errorf("error getting hauth config when creating catalog: %w", err)
-	}
-	newPass, err := rotateCredential(ctx, authzInfo)
-	if err != nil {
-		return nil, fmt.Errorf("error rotating credentials when creating catalog: %w", err)
-	}
-	if newPass == nil {
-		return nil, errors.New("new credential back from rotate is nil")
-	}
-	newSecrets, err := structpb.NewStruct(map[string]interface{}{
-		constSecretId:             *newPass.KeyId,
-		constSecretValue:          *newPass.SecretText,
-		constCredsLastRotatedTime: time.Now().Format(time.RFC3339Nano),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error formatting new credential data as struct")
-	}
-	return &pb.HostCatalogPersisted{
-		Secrets: newSecrets,
-	}, err
-}
-
 func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
-	catalog := req.GetCatalog()
-	if catalog == nil {
-		return nil, errors.New("catalog is nil")
+	if err := validateCatalog(req.GetCatalog()); err != nil {
+		return nil, err
 	}
-	secrets := catalog.GetSecrets()
-	if secrets == nil {
-		// Secrets will have to be provided later, on update
-		return &pb.OnCreateCatalogResponse{}, nil
+	if err := validateSecrets(req.GetCatalog().GetSecrets()); err != nil {
+		return nil, err
 	}
 
-	sanitizeSecretsFields(secrets)
-
-	// Check if rotation is skipped. Always prefer attempting rotation unless we
-	// explicitly are told not to
-	var skipRotation bool
-	if catalog.GetAttributes() != nil {
-		var attrs Attributes
-		if err := mapstructure.Decode(catalog.GetAttributes().AsMap(), &attrs); err != nil {
-			return nil, fmt.Errorf("error decoding catalog attributes: %w", err)
-		}
-		skipRotation = attrs.DisableCredentialRotation
+	secrets := req.GetCatalog().GetSecrets().AsMap()
+	persistedSecrets := map[string]interface{}{
+		constSecretValue: secrets[constSecretValue],
 	}
-	if skipRotation {
-		return &pb.OnCreateCatalogResponse{
-			Persisted: &pb.HostCatalogPersisted{
-				Secrets: secrets,
-			},
-		}, nil
+	if _, ok := secrets[constSecretId]; ok {
+		persistedSecrets[constSecretId] = secrets[constSecretId]
 	}
-
-	newPersisted, err := rotateCredFromCallback(ctx, catalog)
+	persist, err := structpb.NewStruct(persistedSecrets)
 	if err != nil {
-		return nil, fmt.Errorf("error formatting new persisted data: %w", err)
+		return nil, status.Errorf(codes.FailedPrecondition, "failed marshaling persisted secrets: %q", err.Error())
 	}
-	ret := &pb.OnCreateCatalogResponse{
-		Persisted: newPersisted,
-	}
-	return ret, nil
+
+	return &pb.OnCreateCatalogResponse{
+		Persisted: &pb.HostCatalogPersisted{
+			Secrets: persist,
+		},
+	}, nil
 }
 
 func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatalogRequest) (*pb.OnUpdateCatalogResponse, error) {
-	newCatalog := req.GetNewCatalog()
-	if newCatalog == nil {
-		// Should never happen
-		return nil, errors.New("new catalog is nil")
+	if err := validateCatalog(req.GetNewCatalog()); err != nil {
+		return nil, err
 	}
 	currentCatalog := req.GetCurrentCatalog()
 	if currentCatalog == nil {
 		// Should never happen
-		return nil, errors.New("current catalog is nil")
+		return nil, status.Error(codes.FailedPrecondition, "current catalog is nil")
 	}
-	secrets := newCatalog.GetSecrets()
+	secrets := req.GetNewCatalog().GetSecrets()
 	if secrets == nil {
 		// If new secrets weren't passed in, don't rotate what we have on
 		// update.
-		//
-		// TODO: There may be combinations of attributes where those values
-		// changing (or being added) should trigger rotation.
 		return &pb.OnUpdateCatalogResponse{}, nil
 	}
 	sanitizeSecretsFields(secrets)
+	if err := validateSecrets(secrets); err != nil {
+		return nil, err
+	}
 
-	// If the old credential had been rotated, attempt to delete the old
-	// credentials using the new ones; if it fails, proceed anyways, since in
-	// theory only Boundary knows this value so simply forgetting it is safe
-	// enough (if not clean).
-	var field *structpb.Value
-	var pdFields map[string]*structpb.Value
-	var err error
-	var authzInfo *AuthorizationInfo
-
-	persisted := req.GetPersisted()
-	if persisted == nil {
-		goto after_revocation
+	secretsMap := secrets.AsMap()
+	persistedSecrets := map[string]interface{}{
+		constSecretValue: secretsMap[constSecretValue],
 	}
-	if persisted.GetSecrets() == nil {
-		goto after_revocation
+	if _, ok := secretsMap[constSecretId]; ok {
+		persistedSecrets[constSecretId] = secretsMap[constSecretId]
 	}
-	pdFields = persisted.GetSecrets().GetFields()
-	if pdFields == nil {
-		goto after_revocation
-	}
-	field = pdFields[constCredsLastRotatedTime]
-	if field == nil {
-		goto after_revocation
-	}
-	// If the field exists, it is a timestamp here indicating last rotation time
-	currentCatalog.Secrets = req.GetPersisted().Secrets
-	authzInfo, err = getAuthorizationInfo(currentCatalog)
+	persist, err := structpb.NewStruct(persistedSecrets)
 	if err != nil {
-		// TODO: warn in some way?
-		goto after_revocation
-	}
-	if err := removeCredential(ctx, authzInfo); err != nil {
-		// TODO: warn
-		goto after_revocation
+		return nil, status.Errorf(codes.FailedPrecondition, "failed marshaling persisted secrets: %q", err.Error())
 	}
 
-after_revocation:
-	// Check if rotation is skipped. Always prefer attempting rotation unless we
-	// explicitly are told not to
-	var skipRotation bool
-	if attrs := newCatalog.GetAttributes(); attrs != nil {
-		if fields := attrs.GetFields(); fields != nil {
-			if field := fields[constDisableCredentialRotation]; field != nil {
-				if field.GetBoolValue() {
-					skipRotation = true
-				}
-			}
-		}
-	}
-	if skipRotation {
-		return &pb.OnUpdateCatalogResponse{
-			Persisted: &pb.HostCatalogPersisted{
-				Secrets: secrets,
-			},
-		}, nil
-	}
-	newPersisted, err := rotateCredFromCallback(ctx, req.GetNewCatalog())
-	if err != nil {
-		return nil, fmt.Errorf("error formatting new persisted data: %w", err)
-	}
-	ret := &pb.OnUpdateCatalogResponse{
-		Persisted: newPersisted,
-	}
-	return ret, nil
-}
-
-func (p *AzurePlugin) OnDeleteCatalog(ctx context.Context, req *pb.OnDeleteCatalogRequest) (*pb.OnDeleteCatalogResponse, error) {
-	if req.GetCatalog() == nil {
-		return nil, errors.New("catalog is nil")
-	}
-	if req.GetPersisted() == nil || req.GetPersisted().GetSecrets() == nil {
-		return &pb.OnDeleteCatalogResponse{}, nil
-	}
-	// Figure out if creds were rotated
-	pdFields := req.GetPersisted().GetSecrets().GetFields()
-	if pdFields == nil {
-		// No data
-		return &pb.OnDeleteCatalogResponse{}, nil
-	}
-	field := pdFields[constCredsLastRotatedTime]
-	if field == nil {
-		return &pb.OnDeleteCatalogResponse{}, nil
-	}
-	// The field existing means it is a string containing the last time it was
-	// rotated. Delete the credential using current creds.
-	catalog := req.GetCatalog()
-	catalog.Secrets = req.GetPersisted().GetSecrets()
-	authzInfo, err := getAuthorizationInfo(catalog)
-	if err != nil {
-		return nil, fmt.Errorf("error getting auth config on catalog deletion: %w", err)
-	}
-	if err := removeCredential(ctx, authzInfo); err != nil {
-		if err != nil {
-			return nil, fmt.Errorf("error revoking credential on catalog deletion: %w", err)
-		}
-	}
-
-	return &pb.OnDeleteCatalogResponse{}, nil
+	return &pb.OnUpdateCatalogResponse{
+		Persisted: &pb.HostCatalogPersisted{
+			Secrets: persist,
+		},
+	}, nil
 }
 
 func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (*pb.ListHostsResponse, error) {
@@ -221,11 +100,11 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	}
 	catalog := req.GetCatalog()
 	if catalog == nil {
-		return nil, errors.New("catalog is nil")
+		return nil, status.Error(codes.FailedPrecondition, "catalog is nil")
 	}
 	catalogAttrs := catalog.GetAttributes()
 	if catalogAttrs == nil {
-		return nil, errors.New("catalog has no attributes")
+		return nil, status.Error(codes.FailedPrecondition, "catalog has no attributes")
 	}
 
 	// Create an authorizer
@@ -235,7 +114,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		return nil, fmt.Errorf("error fetching authorizationInfo: %w", err)
 	}
 	if authzInfo == nil {
-		return nil, errors.New("authorization info is nil")
+		return nil, status.Error(codes.FailedPrecondition, "authorization info is nil")
 	}
 	authorizer, err := authzInfo.autorestAuthorizer()
 	if err != nil {
@@ -371,11 +250,11 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 				return nil, fmt.Errorf("instance view statuses returned for vm with id %q is null", *res.ID)
 			}
 			var running bool
-			for _, status := range *iv.Statuses {
-				if status.Code == nil {
+			for _, s := range *iv.Statuses {
+				if s.Code == nil {
 					continue
 				}
-				state := strings.ToLower(*status.Code)
+				state := strings.ToLower(*s.Code)
 				prefix := "powerstate/"
 				if !strings.HasPrefix(state, prefix) {
 					continue
@@ -496,4 +375,66 @@ func sanitizeSecretsFields(in *structpb.Struct) {
 	if fields := in.GetFields(); fields != nil {
 		delete(fields, constCredsLastRotatedTime)
 	}
+}
+
+// Returns an invalid argument error with the problematic fields included
+// in the error message.
+func invalidArgumentError(msg string, f map[string]string) error {
+	var fieldMsgs []string
+	for field, val := range f {
+		fieldMsgs = append(fieldMsgs, fmt.Sprintf("%q: %q", field, val))
+	}
+	if len(fieldMsgs) > 0 {
+		msg = fmt.Sprintf("%s: [%s]", msg, strings.Join(fieldMsgs, ", "))
+	}
+	return status.Error(codes.InvalidArgument, msg)
+}
+
+func validateSecrets(s *structpb.Struct) error {
+	if s == nil {
+		return status.Error(codes.InvalidArgument, "Secrets not provided but are required")
+	}
+	var secrets SecretData
+	if err := mapstructure.Decode(s.AsMap(), &secrets); err != nil {
+		return status.Errorf(codes.InvalidArgument, "error decoding catalog secrets: %s", err)
+	}
+	badFields := make(map[string]string)
+	if len(secrets.SecretValue) == 0 {
+		badFields["secrets.secret_value"] = "This field is required."
+	}
+	if len(secrets.CredsLastRotatedTime) != 0 {
+		badFields["secrets.creds_last_rotated_time"] = "This field is reserved and cannot be set."
+	}
+	if len(badFields) > 0 {
+		return invalidArgumentError("Error in the secrets provided", badFields)
+	}
+	return nil
+}
+
+func validateCatalog(catalog *hostcatalogs.HostCatalog) error {
+	if catalog == nil {
+		return status.Error(codes.InvalidArgument, "catalog is nil")
+	}
+	var attrs Attributes
+	if err := mapstructure.Decode(catalog.GetAttributes().AsMap(), &attrs); err != nil {
+		return status.Errorf(codes.InvalidArgument, "error decoding catalog attributes: %s", err)
+	}
+	badFields := make(map[string]string)
+	if !attrs.DisableCredentialRotation {
+		badFields["attributes.disable_credential_rotation"] = "This field must be set to true."
+	}
+	if len(attrs.SubscriptionId) == 0 {
+		badFields["attributes.subscription_id"] = "This is a required field."
+	}
+	if len(attrs.ClientId) == 0 {
+		badFields["attributes.client_id"] = "This is a required field."
+	}
+	if len(attrs.TenantId) == 0 {
+		badFields["attributes.tenant_id"] = "This is a required field."
+	}
+
+	if len(badFields) > 0 {
+		return invalidArgumentError("Invalid arguments in the new catalog", badFields)
+	}
+	return nil
 }
