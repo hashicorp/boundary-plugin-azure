@@ -69,7 +69,6 @@ func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatal
 		// update.
 		return &pb.OnUpdateCatalogResponse{}, nil
 	}
-	sanitizeSecretsFields(secrets)
 	if err := validateSecrets(secrets); err != nil {
 		return nil, err
 	}
@@ -368,13 +367,6 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 		return "", "", fmt.Errorf("unexpected format of resource ID: %v", splitId)
 	}
 	return splitId[3], splitId[7], nil
-}
-
-func sanitizeSecretsFields(in *structpb.Struct) {
-	// Only we are allowed to set this value
-	if fields := in.GetFields(); fields != nil {
-		delete(fields, constCredsLastRotatedTime)
-	}
 }
 
 // Returns an invalid argument error with the problematic fields included

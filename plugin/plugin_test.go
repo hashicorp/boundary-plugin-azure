@@ -163,6 +163,119 @@ func TestValidateSecrets(t *testing.T) {
 	}
 }
 
+func TestCreateCatalog(t *testing.T) {
+	ctx := context.Background()
+	p := &AzurePlugin{}
+	attrs := wrapMap(t, map[string]interface{}{
+		constDisableCredentialRotation: true,
+		constClientId:                  "client_id",
+		constTenantId:                  "tenant_id",
+		constSubscriptionId:            "sub_id",
+	})
+	secrets := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+	})
+
+	res, err := p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secrets,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithExtra := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+		"extraField":     "extra_value",
+	})
+	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secretsWithExtra,
+	}})
+	require.NoError(t, err)
+	// still only persist the fields we care about.
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithRotationTime := wrapMap(t, map[string]interface{}{
+		constSecretValue:          "secret_value",
+		constSecretId:             "secret_id",
+		constCredsLastRotatedTime: "something",
+	})
+	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
+		Attributes: attrs,
+		Secrets:    secretsWithRotationTime,
+	}})
+	assert.Error(t, err)
+}
+
+func TestUpdateCatalog(t *testing.T) {
+	ctx := context.Background()
+	p := &AzurePlugin{}
+
+	oldCatalog := &hostcatalogs.HostCatalog{
+		Attributes: wrapMap(t, map[string]interface{}{
+			constDisableCredentialRotation: true,
+			constClientId:                  "foo",
+			constTenantId:                  "foo",
+			constSubscriptionId:            "foo",
+		}),
+	}
+
+	attrs := wrapMap(t, map[string]interface{}{
+		constDisableCredentialRotation: true,
+		constClientId:                  "client_id",
+		constTenantId:                  "tenant_id",
+		constSubscriptionId:            "sub_id",
+	})
+
+	res, err := p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+		}})
+	require.NoError(t, err)
+	assert.Nil(t, res.GetPersisted())
+
+	secrets := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+	})
+
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secrets,
+		}})
+	require.NoError(t, err)
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithExtra := wrapMap(t, map[string]interface{}{
+		constSecretValue: "secret_value",
+		constSecretId:    "secret_id",
+		"extraField":     "extra_value",
+	})
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secretsWithExtra,
+		}})
+	require.NoError(t, err)
+	// still only persist the fields we care about.
+	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
+
+	secretsWithRotationTime := wrapMap(t, map[string]interface{}{
+		constSecretValue:          "secret_value",
+		constSecretId:             "secret_id",
+		constCredsLastRotatedTime: "something",
+	})
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+		NewCatalog: &hostcatalogs.HostCatalog{
+			Attributes: attrs,
+			Secrets:    secretsWithRotationTime,
+		}})
+	assert.Error(t, err)
+}
+
 func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.HostSet) {
 	require := require.New(t)
 	wd, err := os.Getwd()
