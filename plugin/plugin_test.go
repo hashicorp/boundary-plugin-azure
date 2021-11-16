@@ -5,12 +5,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostsets"
 	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/kr/pretty"
+	"github.com/manicminer/hamilton/auth"
+	"github.com/manicminer/hamilton/environments"
+	"github.com/manicminer/hamilton/msgraph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -287,6 +291,33 @@ func TestUpdateCatalog(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func waitForCreds(t *testing.T, authzInfo *AuthorizationInfo, shouldWork bool) auth.Authorizer {
+	t.Helper()
+	require := require.New(t)
+	ctx := context.Background()
+	auth, err := auth.NewClientSecretAuthorizer(
+		ctx,
+		environments.Global,
+		auth.MsGraph,
+		auth.TokenVersion2,
+		authzInfo.AuthParams.TenantId,
+		authzInfo.AuthParams.ClientId,
+		authzInfo.AuthParams.SecretValue)
+	require.NoError(err)
+
+	for {
+		_, err := auth.Token()
+		switch {
+		case shouldWork && err == nil:
+			return auth
+		case !shouldWork && err != nil:
+			return nil
+		default:
+			time.Sleep(30 * time.Second)
+		}
+	}
+}
+
 func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.HostSet) {
 	require := require.New(t)
 	wd, err := os.Getwd()
@@ -329,4 +360,45 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 	}
 
 	return hc, hses
+}
+
+// This function creates a new secret so we don't revoke the original one
+// leading into a test. This will serve as our "initial secret" for a test. We
+// also return a few cached items. It is expected that the host catalog contains
+// Secrets.
+func testCreateInitialSecret(t *testing.T, hostCatalog *hostcatalogs.HostCatalog) (*AuthorizationInfo, *msgraph.PasswordCredential, func()) {
+	require := require.New(t)
+	ctx := context.Background()
+
+	var initialCred *msgraph.PasswordCredential
+
+	// Set up the data, get the config
+	authzInfo, err := getAuthorizationInfo(hostCatalog)
+	require.NoError(err)
+
+	// Get the credential
+	initialCred, err = addCredential(ctx, authzInfo)
+	require.NoError(err)
+	require.NotNil(initialCred)
+	require.NotNil(initialCred.KeyId)
+	require.NotNil(initialCred.SecretText)
+
+	origAuthConfig := *authzInfo
+	origAuthConfig.AuthParams.SecretId = *initialCred.KeyId
+	cleanup := func() {
+		if err := removeCredential(
+			ctx,
+			&origAuthConfig,
+		); err != nil {
+			// It may not exist because it's been rotated
+			require.Contains(err.Error(), "No password credential found with keyId", err.Error())
+		}
+	}
+
+	authzInfo.AuthParams.SecretId = *initialCred.KeyId
+	authzInfo.AuthParams.SecretValue = *initialCred.SecretText
+	authzInfo.HamiltonConfig.ClientSecret = *initialCred.SecretText
+	waitForCreds(t, authzInfo, true)
+
+	return authzInfo, initialCred, cleanup
 }

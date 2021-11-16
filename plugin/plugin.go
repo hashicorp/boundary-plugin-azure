@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
@@ -26,6 +27,31 @@ type AzurePlugin struct {
 var (
 	_ pb.HostPluginServiceServer = (*AzurePlugin)(nil)
 )
+
+func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
+	authzInfo, err := getAuthorizationInfo(catalog)
+	if err != nil {
+		return nil, fmt.Errorf("error getting hauth config when creating catalog: %w", err)
+	}
+	newPass, err := rotateCredential(ctx, authzInfo)
+	if err != nil {
+		return nil, fmt.Errorf("error rotating credentials when creating catalog: %w", err)
+	}
+	if newPass == nil {
+		return nil, errors.New("new credential back from rotate is nil")
+	}
+	newSecrets, err := structpb.NewStruct(map[string]interface{}{
+		constSecretId:             *newPass.KeyId,
+		constSecretValue:          *newPass.SecretText,
+		constCredsLastRotatedTime: time.Now().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error formatting new credential data as struct")
+	}
+	return &pb.HostCatalogPersisted{
+		Secrets: newSecrets,
+	}, err
+}
 
 func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
 	if err := validateCatalog(req.GetCatalog()); err != nil {
