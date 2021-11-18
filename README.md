@@ -19,24 +19,22 @@ Current limitations of this plugin:
   compute resource
 - A client secret must be generated against a registered application with any
   necessary permissions
+- For now, credential rotation must be disabled using the `disable_credential_rotation`
+  attribute. There is some additional work that the Boundary team identified
+  that is necessary to make this a seamless experience.
 
 ## Credential Rotation
 
-Although credentials are stored encrypted within Boundary, by default this
-plugin will attempt to rotate credentials when they are supplied through the
-`secrets` object on a create or update call to the host catalog resource. The
-given credentials will be used to create a new credential, and then the given
-credential will be revoked. In this way, after rotation, only Boundary knows the
-client secret in use by this plugin.
+*NOTE*: For now credential rotation must be explicitly disabled by setting
+`disable_credential_rotation` to true on the host catalog.  When we lift this
+restriction Boundary will manage the rotation of credentials for you.
 
-*NOTE*: Azure's credentials are eventually consistent and there may be
-significant delay (up to ten minutes or more) between when a credential is
-created and is available for use, or when a credential is deleted and
-unavailable for use. At the API level, this can be true even if the Azure Portal
-indicates that the credential is (or isn't) there. This delay will manifest as
-authentication failures when performing actions using this plugin. If secrets
-have just been supplied and `disable_credential_rotation` is not specified,
-please be patient and try again later.
+Although credentials are stored encrypted within Boundary, when credential 
+rotation isn't explicitly disabled, this plugin will attempt to rotate
+credentials when they are supplied through the `secrets` object on a create or
+update call to the host catalog resource. The given credentials will be used to
+create a new credential, and then the given credential will be revoked. In this
+way, after rotation, only Boundary knows the client secret in use by this plugin.
 
 ## Attributes and Secrets
 
