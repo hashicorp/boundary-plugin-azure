@@ -19,14 +19,15 @@ Current limitations of this plugin:
   compute resource
 - A client secret must be generated against a registered application with any
   necessary permissions
-- Credential rotation must be disabled using the `disable_credential_rotation`
-  attribute.
+- For now, credential rotation must be disabled using the `disable_credential_rotation`
+  attribute. There is some additional work that the Boundary team identified
+  that is necessary to make this a seamless experience.
 
 ## Credential Rotation
 
 *NOTE*: For now credential rotation must be explicitly disabled by setting
-`disable_credential_rotation`to true on the host catalog.  When we lift this
-restriction boundary will manage the rotation of credentials for you.
+`disable_credential_rotation` to true on the host catalog.  When we lift this
+restriction Boundary will manage the rotation of credentials for you.
 
 Although credentials are stored encrypted within Boundary, when credential 
 rotation isn't explicitly disabled, this plugin will attempt to rotate
