@@ -21,7 +21,7 @@ type AuthorizationInfo struct {
 	AuthParams     AuthParams
 }
 
-type Attributes struct {
+type CatalogAttributes struct {
 	SubscriptionId            string `mapstructure:"subscription_id"`
 	ClientId                  string `mapstructure:"client_id"`
 	TenantId                  string `mapstructure:"tenant_id"`
@@ -55,7 +55,7 @@ func getAuthorizationInfo(hc *hostcatalogs.HostCatalog) (*AuthorizationInfo, err
 	}
 
 	hcFields := hc.GetAttributes().AsMap()
-	var attrs Attributes
+	var attrs CatalogAttributes
 	if err := mapstructure.Decode(hcFields, &attrs); err != nil {
 		return nil, fmt.Errorf("error decoding host catalog attribute fields: %w", err)
 	}

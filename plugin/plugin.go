@@ -10,6 +10,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
 	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
+	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostsets"
 	"github.com/mitchellh/mapstructure"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,6 +28,10 @@ type AzurePlugin struct {
 var (
 	_ pb.HostPluginServiceServer = (*AzurePlugin)(nil)
 )
+
+type SetAttributes struct {
+	Filter string `mapstructure:"filter"`
+}
 
 func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
 	authzInfo, err := getAuthorizationInfo(catalog)
@@ -53,7 +58,7 @@ func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatal
 	}, err
 }
 
-func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
+func (p *AzurePlugin) OnCreateCatalog(_ context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
 	if err := validateCatalog(req.GetCatalog()); err != nil {
 		return nil, err
 	}
@@ -80,7 +85,7 @@ func (p *AzurePlugin) OnCreateCatalog(ctx context.Context, req *pb.OnCreateCatal
 	}, nil
 }
 
-func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatalogRequest) (*pb.OnUpdateCatalogResponse, error) {
+func (p *AzurePlugin) OnUpdateCatalog(_ context.Context, req *pb.OnUpdateCatalogRequest) (*pb.OnUpdateCatalogResponse, error) {
 	if err := validateCatalog(req.GetNewCatalog()); err != nil {
 		return nil, err
 	}
@@ -116,6 +121,20 @@ func (p *AzurePlugin) OnUpdateCatalog(ctx context.Context, req *pb.OnUpdateCatal
 			Secrets: persist,
 		},
 	}, nil
+}
+
+func (p *AzurePlugin) OnCreateSet(_ context.Context, req *pb.OnCreateSetRequest) (*pb.OnCreateSetResponse, error) {
+	if err := validateSet(req.GetSet()); err != nil {
+		return nil, err
+	}
+	return &pb.OnCreateSetResponse{}, nil
+}
+
+func (p *AzurePlugin) OnUpdateSet(_ context.Context, req *pb.OnUpdateSetRequest) (*pb.OnUpdateSetResponse, error) {
+	if err := validateSet(req.GetNewSet()); err != nil {
+		return nil, err
+	}
+	return &pb.OnUpdateSetResponse{}, nil
 }
 
 func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (*pb.ListHostsResponse, error) {
@@ -429,19 +448,19 @@ func validateSecrets(s *structpb.Struct) error {
 	return nil
 }
 
-var allowedFields = map[string]struct{}{
+var allowedCatalogFields = map[string]struct{}{
 	constDisableCredentialRotation: {},
 	constSubscriptionId:            {},
 	constTenantId:                  {},
 	constClientId:                  {},
 }
 
-func validateCatalog(catalog *hostcatalogs.HostCatalog) error {
-	if catalog == nil {
+func validateCatalog(c *hostcatalogs.HostCatalog) error {
+	if c == nil {
 		return status.Error(codes.InvalidArgument, "catalog is nil")
 	}
-	var attrs Attributes
-	attrMap := catalog.GetAttributes().AsMap()
+	var attrs CatalogAttributes
+	attrMap := c.GetAttributes().AsMap()
 	if err := mapstructure.Decode(attrMap, &attrs); err != nil {
 		return status.Errorf(codes.InvalidArgument, "error decoding catalog attributes: %s", err)
 	}
@@ -460,13 +479,43 @@ func validateCatalog(catalog *hostcatalogs.HostCatalog) error {
 	}
 
 	for f := range attrMap {
-		if _, ok := allowedFields[f]; !ok {
+		if _, ok := allowedCatalogFields[f]; !ok {
 			badFields[fmt.Sprintf("attributes.%s", f)] = "Unrecognized field."
 		}
 	}
 
 	if len(badFields) > 0 {
 		return invalidArgumentError("Invalid arguments in the new catalog", badFields)
+	}
+	return nil
+}
+
+var allowedSetFields = map[string]struct{}{
+	constFilter: {},
+}
+
+func validateSet(s *hostsets.HostSet) error {
+	if s == nil {
+		return status.Error(codes.InvalidArgument, "set is nil")
+	}
+	var attrs SetAttributes
+	attrMap := s.GetAttributes().AsMap()
+	if err := mapstructure.Decode(attrMap, &attrs); err != nil {
+		return status.Errorf(codes.InvalidArgument, "error decoding set attributes: %s", err)
+	}
+	badFields := make(map[string]string)
+	if _, ok := attrMap[constFilter]; ok && len(attrs.Filter) == 0 {
+		badFields["attributes.filter"] = "This field must be not empty."
+	}
+
+	for f := range attrMap {
+		if _, ok := allowedSetFields[f]; !ok {
+			badFields[fmt.Sprintf("attributes.%s", f)] = "Unrecognized field."
+		}
+	}
+
+	if len(badFields) > 0 {
+		return invalidArgumentError("Invalid arguments in the new set", badFields)
 	}
 	return nil
 }
