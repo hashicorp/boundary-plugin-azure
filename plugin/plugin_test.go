@@ -63,6 +63,16 @@ func TestValidateCatalog(t *testing.T) {
 			}),
 		},
 		{
+			name: "bad type",
+			catalogAttrs: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: "bad type",
+				constClientId:                  "client_id",
+				constTenantId:                  "tenant_id",
+				constSubscriptionId:            "sub_id",
+			}),
+			wantError: true,
+		},
+		{
 			name:         "nil",
 			catalogAttrs: nil,
 			wantError:    true,
@@ -169,6 +179,60 @@ func TestValidateSecrets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := validateSecrets(tc.catalogSecrets)
+			if tc.wantError {
+				assert.Error(t, got)
+			} else {
+				assert.NoError(t, got)
+			}
+		})
+	}
+}
+
+func TestValidateSet(t *testing.T) {
+	cases := []struct {
+		name      string
+		setAttrs  *structpb.Struct
+		wantError bool
+	}{
+		{
+			name: "success",
+			setAttrs: wrapMap(t, map[string]interface{}{
+				constFilter: "filter value",
+			}),
+		},
+		{
+			name:     "nil",
+			setAttrs: nil,
+		},
+		{
+			name: "bad type",
+			setAttrs: wrapMap(t, map[string]interface{}{
+				constFilter: true,
+			}),
+			wantError: true,
+		},
+		{
+			name: "empty",
+			setAttrs: wrapMap(t, map[string]interface{}{
+				constFilter: "",
+			}),
+			wantError: true,
+		},
+		{
+			name: "unrecognized field",
+			setAttrs: wrapMap(t, map[string]interface{}{
+				constFilter:    "filter value",
+				"unrecognized": "unrecognized",
+			}),
+			wantError: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateSet(&hostsets.HostSet{
+				Attributes: tc.setAttrs,
+			})
 			if tc.wantError {
 				assert.Error(t, got)
 			} else {
