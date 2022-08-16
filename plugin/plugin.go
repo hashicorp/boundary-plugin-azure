@@ -255,7 +255,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 				if val.ID == nil { // something went wrong, likely iterator has advanced beyond the end
 					continue
 				}
-				if val.Type == nil || *val.Type != "Microsoft.Compute/virtualMachines" {
+				if val.Type == nil || !strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines") {
 					// no point continuing if we can't validate that it's a VM
 					continue
 				}
@@ -404,11 +404,11 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 	splitId := strings.Split(strings.TrimLeft(in, "/"), "/")
 	// Run through some sanity checks
 	if len(splitId) != 8 ||
-		splitId[0] != constSubscriptions ||
-		splitId[2] != constResourceGroups ||
-		splitId[4] != constProviders ||
-		splitId[5] != expectedService ||
-		splitId[6] != expectedResource {
+		!strings.EqualFold(splitId[0], constSubscriptions) ||
+		!strings.EqualFold(splitId[2], constResourceGroups) ||
+		!strings.EqualFold(splitId[4], constProviders) ||
+		!strings.EqualFold(splitId[5], expectedService) ||
+		!strings.EqualFold(splitId[6], expectedResource) {
 		return "", "", fmt.Errorf("unexpected format of resource ID: %v", splitId)
 	}
 	return splitId[3], splitId[7], nil
