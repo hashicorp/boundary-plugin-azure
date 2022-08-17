@@ -15,4 +15,4 @@
 # vendor/
 
 # Test credentials and other items
-/plugin/private/*
+/plugin/private*
