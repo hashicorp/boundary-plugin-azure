@@ -8,7 +8,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/compute/mgmt/compute"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
-	hauth "github.com/manicminer/hamilton/auth"
+	"github.com/manicminer/hamilton/environments"
 	"github.com/manicminer/hamilton/msgraph"
 )
 
@@ -117,7 +117,7 @@ func getApplicationsClient(ctx context.Context, authzInfo *AuthorizationInfo) (*
 		return nil, errors.New("empty auth config id when fetching service principals client")
 	}
 
-	authorizer, err := authzInfo.HamiltonConfig.NewAuthorizer(ctx, hauth.MsGraph)
+	authorizer, err := authzInfo.HamiltonConfig.NewAuthorizer(ctx, environments.Global.MsGraph)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching hauth authorizer when fetching service principals client: %w", err)
 	}

@@ -43,6 +43,7 @@ func TestListHosts(t *testing.T) {
 	})
 	require.NoError(err)
 	require.NotNil(lhResp)
+	require.NotEmpty(lhResp.GetHosts())
 
 	pretty.Println(lhResp.GetHosts())
 }
@@ -130,7 +131,9 @@ func TestValidateCatalog(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := validateCatalog(&hostcatalogs.HostCatalog{
-				Attributes: tc.catalogAttrs,
+				Attrs: &hostcatalogs.HostCatalog_Attributes{
+					Attributes: tc.catalogAttrs,
+				},
 			})
 			if tc.wantError {
 				assert.Error(t, got)
@@ -231,7 +234,9 @@ func TestValidateSet(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := validateSet(&hostsets.HostSet{
-				Attributes: tc.setAttrs,
+				Attrs: &hostsets.HostSet_Attributes{
+					Attributes: tc.setAttrs,
+				},
 			})
 			if tc.wantError {
 				assert.Error(t, got)
@@ -257,8 +262,10 @@ func TestCreateCatalog(t *testing.T) {
 	})
 
 	res, err := p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
-		Attributes: attrs,
-		Secrets:    secrets,
+		Attrs: &hostcatalogs.HostCatalog_Attributes{
+			Attributes: attrs,
+		},
+		Secrets: secrets,
 	}})
 	require.NoError(t, err)
 	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
@@ -269,8 +276,10 @@ func TestCreateCatalog(t *testing.T) {
 		"extraField":     "extra_value",
 	})
 	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
-		Attributes: attrs,
-		Secrets:    secretsWithExtra,
+		Attrs: &hostcatalogs.HostCatalog_Attributes{
+			Attributes: attrs,
+		},
+		Secrets: secretsWithExtra,
 	}})
 	require.NoError(t, err)
 	// still only persist the fields we care about.
@@ -282,8 +291,10 @@ func TestCreateCatalog(t *testing.T) {
 		constCredsLastRotatedTime: "something",
 	})
 	res, err = p.OnCreateCatalog(ctx, &pb.OnCreateCatalogRequest{Catalog: &hostcatalogs.HostCatalog{
-		Attributes: attrs,
-		Secrets:    secretsWithRotationTime,
+		Attrs: &hostcatalogs.HostCatalog_Attributes{
+			Attributes: attrs,
+		},
+		Secrets: secretsWithRotationTime,
 	}})
 	assert.Error(t, err)
 }
@@ -293,12 +304,14 @@ func TestUpdateCatalog(t *testing.T) {
 	p := &AzurePlugin{}
 
 	oldCatalog := &hostcatalogs.HostCatalog{
-		Attributes: wrapMap(t, map[string]interface{}{
-			constDisableCredentialRotation: true,
-			constClientId:                  "foo",
-			constTenantId:                  "foo",
-			constSubscriptionId:            "foo",
-		}),
+		Attrs: &hostcatalogs.HostCatalog_Attributes{
+			Attributes: wrapMap(t, map[string]interface{}{
+				constDisableCredentialRotation: true,
+				constClientId:                  "foo",
+				constTenantId:                  "foo",
+				constSubscriptionId:            "foo",
+			}),
+		},
 	}
 
 	attrs := wrapMap(t, map[string]interface{}{
@@ -308,10 +321,14 @@ func TestUpdateCatalog(t *testing.T) {
 		constSubscriptionId:            "sub_id",
 	})
 
-	res, err := p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+	res, err := p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{
+		CurrentCatalog: oldCatalog,
 		NewCatalog: &hostcatalogs.HostCatalog{
-			Attributes: attrs,
-		}})
+			Attrs: &hostcatalogs.HostCatalog_Attributes{
+				Attributes: attrs,
+			},
+		},
+	})
 	require.NoError(t, err)
 	assert.Nil(t, res.GetPersisted())
 
@@ -320,11 +337,15 @@ func TestUpdateCatalog(t *testing.T) {
 		constSecretId:    "secret_id",
 	})
 
-	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{
+		CurrentCatalog: oldCatalog,
 		NewCatalog: &hostcatalogs.HostCatalog{
-			Attributes: attrs,
-			Secrets:    secrets,
-		}})
+			Attrs: &hostcatalogs.HostCatalog_Attributes{
+				Attributes: attrs,
+			},
+			Secrets: secrets,
+		},
+	})
 	require.NoError(t, err)
 	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
 
@@ -333,11 +354,15 @@ func TestUpdateCatalog(t *testing.T) {
 		constSecretId:    "secret_id",
 		"extraField":     "extra_value",
 	})
-	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{
+		CurrentCatalog: oldCatalog,
 		NewCatalog: &hostcatalogs.HostCatalog{
-			Attributes: attrs,
-			Secrets:    secretsWithExtra,
-		}})
+			Attrs: &hostcatalogs.HostCatalog_Attributes{
+				Attributes: attrs,
+			},
+			Secrets: secretsWithExtra,
+		},
+	})
 	require.NoError(t, err)
 	// still only persist the fields we care about.
 	assert.Equal(t, res.GetPersisted().GetSecrets().AsMap(), secrets.AsMap())
@@ -347,11 +372,15 @@ func TestUpdateCatalog(t *testing.T) {
 		constSecretId:             "secret_id",
 		constCredsLastRotatedTime: "something",
 	})
-	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{CurrentCatalog: oldCatalog,
+	res, err = p.OnUpdateCatalog(ctx, &pb.OnUpdateCatalogRequest{
+		CurrentCatalog: oldCatalog,
 		NewCatalog: &hostcatalogs.HostCatalog{
-			Attributes: attrs,
-			Secrets:    secretsWithRotationTime,
-		}})
+			Attrs: &hostcatalogs.HostCatalog_Attributes{
+				Attributes: attrs,
+			},
+			Secrets: secretsWithRotationTime,
+		},
+	})
 	assert.Error(t, err)
 }
 
@@ -362,9 +391,10 @@ func waitForCreds(t *testing.T, authzInfo *AuthorizationInfo, shouldWork bool) a
 	auth, err := auth.NewClientSecretAuthorizer(
 		ctx,
 		environments.Global,
-		auth.MsGraph,
+		environments.Global.MsGraph,
 		auth.TokenVersion2,
 		authzInfo.AuthParams.TenantId,
+		nil,
 		authzInfo.AuthParams.ClientId,
 		authzInfo.AuthParams.SecretValue)
 	require.NoError(err)
@@ -398,11 +428,13 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 
 	// These values will not change througout the test
 	hc := &hostcatalogs.HostCatalog{
-		Attributes: wrapMap(t, map[string]interface{}{
-			constSubscriptionId: subscriptionId,
-			constTenantId:       tenantId,
-			constClientId:       clientId,
-		}),
+		Attrs: &hostcatalogs.HostCatalog_Attributes{
+			Attributes: wrapMap(t, map[string]interface{}{
+				constSubscriptionId: subscriptionId,
+				constTenantId:       tenantId,
+				constClientId:       clientId,
+			}),
+		},
 		Secrets: wrapMap(t, map[string]interface{}{
 			constSecretValue: secretValue,
 		}),
@@ -411,15 +443,19 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 	hses := []*hostsets.HostSet{
 		{
 			Id: "set1",
-			Attributes: wrapMap(t, map[string]interface{}{
-				constFilter: constDefaultFilter,
-			}),
+			Attrs: &hostsets.HostSet_Attributes{
+				Attributes: wrapMap(t, map[string]interface{}{
+					constFilter: constDefaultFilter,
+				}),
+			},
 		},
 		{
 			Id: "set2",
-			Attributes: wrapMap(t, map[string]interface{}{
-				constFilter: constDefaultFilter,
-			}),
+			Attrs: &hostsets.HostSet_Attributes{
+				Attributes: wrapMap(t, map[string]interface{}{
+					constFilter: constDefaultFilter,
+				}),
+			},
 		},
 	}
 
