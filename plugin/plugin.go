@@ -389,10 +389,16 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 
 	ret := &pb.ListHostsResponse{}
 	for k, v := range vmToNetworkMap {
+		_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
+		if err != nil {
+			externalName = ""
+		}
+
 		host := &pb.ListHostsResponseHost{
-			ExternalId:  k,
-			IpAddresses: v.IpAddresses,
-			SetIds:      resourceToSetMap[k],
+			ExternalId:   k,
+			ExternalName: externalName,
+			IpAddresses:  v.IpAddresses,
+			SetIds:       resourceToSetMap[k],
 		}
 		ret.Hosts = append(ret.Hosts, host)
 	}
