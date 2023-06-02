@@ -1,4 +1,4 @@
-module github.com/hashicorp/boundary-plugin-host-azure
+module github.com/hashicorp/boundary-plugin-azure
 
 go 1.18
 
