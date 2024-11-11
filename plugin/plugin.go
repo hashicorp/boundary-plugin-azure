@@ -587,7 +587,7 @@ func getExternalNameforVMSSInstance(in string) (string, error) {
 		!strings.EqualFold(splitId[8], constVirtualMachinesResource) {
 		return "", fmt.Errorf("unexpected format of virtual machine stateful set ID: %v", splitId)
 	}
-	return splitId[7] + "-" + splitId[9], nil
+	return splitId[7] + "_" + splitId[9], nil
 }
 
 // extract the vmss name from the vmss instance id string
