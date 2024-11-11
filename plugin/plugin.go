@@ -479,7 +479,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 						if ifaceRef.ID == nil {
 							return nil, fmt.Errorf("nil ID for network interface for vm with id %q", *res.ID)
 						}
-						var ifName = extractResourceSuffix(*ifaceRef.ID)
+						ifName := extractResourceSuffix(*ifaceRef.ID)
 						iface, err := ifClient.GetVirtualMachineScaleSetNetworkInterface(ctx, resourceGroup, name, *vmssvm.InstanceID, ifName, "")
 						if err != nil {
 							return nil, fmt.Errorf("error fetching network interface with id %q: %w", *ifaceRef.ID, err)
@@ -525,16 +525,32 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 
 	ret := &pb.ListHostsResponse{}
 	for k, v := range vmToNetworkMap {
-		_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
-		if err != nil {
-			externalName = ""
+		var host *pb.ListHostsResponseHost
+		// see if we're dealing with a VMSS instance or a VM
+		if strings.Contains(k, constMsComputeService+"/"+constVirtualMachineScaleSetsResource) {
+			externalName, err := getExternalNameforVMSSInstance(k)
+			if err != nil {
+				externalName = ""
+			}
+			setId := getSetForVMSSInstance(k)
+			host = &pb.ListHostsResponseHost{
+				ExternalId:   k,
+				ExternalName: externalName,
+				IpAddresses:  v.IpAddresses,
+				SetIds:       resourceToSetMap[setId],
+			}
 		}
-
-		host := &pb.ListHostsResponseHost{
-			ExternalId:   k,
-			ExternalName: externalName,
-			IpAddresses:  v.IpAddresses,
-			SetIds:       resourceToSetMap[k],
+		if strings.Contains(k, constMsComputeService+"/"+constVirtualMachinesResource) {
+			_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
+			if err != nil {
+				externalName = ""
+			}
+			host = &pb.ListHostsResponseHost{
+				ExternalId:   k,
+				ExternalName: externalName,
+				IpAddresses:  v.IpAddresses,
+				SetIds:       resourceToSetMap[k],
+			}
 		}
 		ret.Hosts = append(ret.Hosts, host)
 	}
@@ -557,6 +573,29 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 		return "", "", fmt.Errorf("unexpected format of resource ID: %v", splitId)
 	}
 	return splitId[3], splitId[7], nil
+}
+
+// concatenate the vmss name with the vmss instance id to get the external name
+func getExternalNameforVMSSInstance(in string) (string, error) {
+	splitId := strings.Split(strings.TrimLeft(in, "/"), "/")
+	if len(splitId) != 10 ||
+		!strings.EqualFold(splitId[0], constSubscriptions) ||
+		!strings.EqualFold(splitId[2], constResourceGroups) ||
+		!strings.EqualFold(splitId[4], constProviders) ||
+		!strings.EqualFold(splitId[5], constMsComputeService) ||
+		!strings.EqualFold(splitId[6], constVirtualMachineScaleSetsResource) ||
+		!strings.EqualFold(splitId[8], constVirtualMachinesResource) {
+		return "", fmt.Errorf("unexpected format of virtual machine stateful set ID: %v", splitId)
+	}
+	return splitId[7] + "-" + splitId[9], nil
+}
+
+// extract the vmss name from the vmss instance id string
+func getSetForVMSSInstance(in string) string {
+	// Find the index of "virtualMachines" and take only the portion before it
+	trimmed := strings.Split(in, "/"+constVirtualMachinesResource)[0]
+
+	return trimmed
 }
 
 // helper function to return the last part of the interface ID
