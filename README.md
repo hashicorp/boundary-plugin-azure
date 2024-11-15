@@ -1,3 +1,4 @@
+test
 # Azure Host Plugin for HashiCorp Boundary
 
 This repo contains a Host-type plugin for [HashiCorp
