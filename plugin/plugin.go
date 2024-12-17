@@ -203,6 +203,20 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	if vmClient == nil {
 		return nil, errors.New("virtual machines client is nil")
 	}
+	vmssClient, err := getVirtualMachineScaleSetsClient(commonOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching virtual machine scale set vms client: %w", err)
+	}
+	if vmssClient == nil {
+		return nil, errors.New("virtual machine scale set client vms client is nil")
+	}
+	vmssvmClient, err := getVirtualMachineScaleSetVMsClient(commonOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching virtual machine scale set vms client: %w", err)
+	}
+	if vmssvmClient == nil {
+		return nil, errors.New("virtual machine scale set vms client is nil")
+	}
 	ifClient, err := getNetworkInterfacesClient(commonOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching network interfaces client: %w", err)
@@ -258,8 +272,13 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 				if val.ID == nil { // something went wrong, likely iterator has advanced beyond the end
 					continue
 				}
-				if val.Type == nil || !strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines") {
-					// no point continuing if we can't validate that it's a VM
+				if val.Type == nil { // no point continuing if we can't validate that it's a VM
+					continue
+				}
+				isVm := strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines")
+				isVmss := strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachineScaleSets")
+				if val.Type != nil && !isVm && !isVmss {
+					// we have a resource that is not a VM, or a VM in a scale set, skip
 					continue
 				}
 				resourceInfos = append(resourceInfos, val)
@@ -279,71 +298,75 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	// Anyways, now we find VM details for those resources
 	vmToIfaceMap := make(map[string][]network.Interface)
 	{
+		var virtualMachineTypeSb strings.Builder
+		virtualMachineType := constMsComputeService + "/" + constVirtualMachinesResource
 		for _, res := range resourceInfos {
-			resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
-			if err != nil {
-				return nil, fmt.Errorf("error splitting vm id %q: %w", *res.ID, err)
-			}
-			vm, err := vmClient.Get(ctx, resourceGroup, name, "")
-			if err != nil {
-				return nil, fmt.Errorf("error fetching vm with id %q: %w", *res.ID, err)
-			}
-
-			iv, err := vmClient.InstanceView(ctx, resourceGroup, name)
-			if err != nil {
-				return nil, fmt.Errorf("error fetching instance view for vm with id %q: %w", *res.ID, err)
-			}
-			if iv.Statuses == nil {
-				return nil, fmt.Errorf("instance view statuses returned for vm with id %q is null", *res.ID)
-			}
-			var running bool
-			for _, s := range *iv.Statuses {
-				if s.Code == nil {
-					continue
-				}
-				state := strings.ToLower(*s.Code)
-				prefix := "powerstate/"
-				if !strings.HasPrefix(state, prefix) {
-					continue
-				}
-				state = strings.TrimPrefix(state, prefix)
-				if state == "running" {
-					running = true
-					break
-				}
-			}
-			if !running {
-				continue
-			}
-
-			props := vm.VirtualMachineProperties
-			if props == nil {
-				return nil, fmt.Errorf("error fetching properties for vm with id %q: %w", *res.ID, err)
-			}
-			if props.NetworkProfile == nil {
-				return nil, fmt.Errorf("error fetching network profile for vm with id %q", *res.ID)
-			}
-
-			// Within the VM, catalog the various interfaces
-			var ifaces []network.Interface
-			for _, ifaceRef := range *props.NetworkProfile.NetworkInterfaces {
-				if ifaceRef.ID == nil {
-					return nil, fmt.Errorf("nil ID for network interface for vm with id %q", *res.ID)
-				}
-				ifResGroup, ifName, err := splitId(*ifaceRef.ID, constMsNetworkService, constNetworkInterfacesResource)
+			if strings.EqualFold(*res.Type, virtualMachineTypeSb.String()) {
+				resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
 				if err != nil {
-					return nil, fmt.Errorf("error splitting network interface id %q: %w", *ifaceRef.ID, err)
+					return nil, fmt.Errorf("error splitting vm id %q: %w", *res.ID, err)
 				}
-				iface, err := ifClient.Get(ctx, ifResGroup, ifName, "")
+				vm, err := vmClient.Get(ctx, resourceGroup, name, "")
 				if err != nil {
-					return nil, fmt.Errorf("error fetching network interface with id %q: %w", *ifaceRef.ID, err)
+					return nil, fmt.Errorf("error fetching vm with id %q: %w", *res.ID, err)
 				}
-				if iface.InterfacePropertiesFormat == nil || iface.InterfacePropertiesFormat.IPConfigurations == nil {
+
+				iv, err := vmClient.InstanceView(ctx, resourceGroup, name)
+				if err != nil {
+					return nil, fmt.Errorf("error fetching instance view for vm with id %q: %w", *res.ID, err)
+				}
+				if iv.Statuses == nil {
+					return nil, fmt.Errorf("instance view statuses returned for vm with id %q is null", *res.ID)
+				}
+				var running bool
+				for _, s := range *iv.Statuses {
+					if s.Code == nil {
+						continue
+					}
+					state := strings.ToLower(*s.Code)
+					prefix := "powerstate/"
+					if !strings.HasPrefix(state, prefix) {
+						continue
+					}
+					state = strings.TrimPrefix(state, prefix)
+					if state == "running" {
+						running = true
+						break
+					}
+				}
+				if !running {
 					continue
 				}
-				ifaces = append(ifaces, iface)
+
+				props := vm.VirtualMachineProperties
+				if props == nil {
+					return nil, fmt.Errorf("error fetching properties for vm with id %q: %w", *res.ID, err)
+				}
+				if props.NetworkProfile == nil {
+					return nil, fmt.Errorf("error fetching network profile for vm with id %q", *res.ID)
+				}
+
+				// Within the VM, catalog the various interfaces
+				var ifaces []network.Interface
+				for _, ifaceRef := range *props.NetworkProfile.NetworkInterfaces {
+					if ifaceRef.ID == nil {
+						return nil, fmt.Errorf("nil ID for network interface for vm with id %q", *res.ID)
+					}
+					ifResGroup, ifName, err := splitId(*ifaceRef.ID, constMsNetworkService, constNetworkInterfacesResource)
+					if err != nil {
+						return nil, fmt.Errorf("error splitting network interface id %q: %w", *ifaceRef.ID, err)
+					}
+					iface, err := ifClient.Get(ctx, ifResGroup, ifName, "")
+					if err != nil {
+						return nil, fmt.Errorf("error fetching network interface with id %q: %w", *ifaceRef.ID, err)
+					}
+					if iface.InterfacePropertiesFormat == nil || iface.InterfacePropertiesFormat.IPConfigurations == nil {
+						continue
+					}
+					ifaces = append(ifaces, iface)
+				}
+				vmToIfaceMap[*res.ID] = ifaces
 			}
-			vmToIfaceMap[*res.ID] = ifaces
 		}
 	}
 
@@ -356,6 +379,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		for vmId, ifaces := range vmToIfaceMap {
 			var netInfo networkInfo
 			for _, iface := range ifaces {
+				// we're looking at a standard network interface here
 				for _, ipconf := range *iface.InterfacePropertiesFormat.IPConfigurations {
 					if ipconf.PrivateIPAddress != nil {
 						netInfo.IpAddresses = append(netInfo.IpAddresses, *ipconf.PrivateIPAddress)
@@ -382,23 +406,151 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 						}
 					}
 				}
+				vmToNetworkMap[vmId] = netInfo
 			}
-			vmToNetworkMap[vmId] = netInfo
+		}
+	}
+
+	// Now we need to do the same thing for virtual machine scalesets and the VMs they contain
+	// This is slightly different because the VMSS encapsulates the VM instances and their network configurations
+	{
+		var virtualMachineScaleSetTypeSb strings.Builder
+		virtualMachineScaleSetTypeSb.WriteString(constMsComputeService)
+		virtualMachineScaleSetTypeSb.WriteString("/")
+		virtualMachineScaleSetTypeSb.WriteString(constVirtualMachineScaleSetsResource)
+		for _, res := range resourceInfos {
+			if strings.EqualFold(*res.Type, virtualMachineScaleSetTypeSb.String()) {
+				resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachineScaleSetsResource)
+				if err != nil {
+					return nil, fmt.Errorf("error splitting vm id %q: %w", *res.ID, err)
+				}
+				vmss, err := vmssClient.Get(ctx, resourceGroup, name, "")
+				if err != nil {
+					return nil, fmt.Errorf("error fetching vm with id %q: %w", *res.ID, err)
+				}
+
+				vmssvms, err := vmssvmClient.List(ctx, resourceGroup, *vmss.Name, "", "", "")
+				if err != nil {
+					return nil, fmt.Errorf("error fetching vms for vmss with id %q: %w", *res.ID, err)
+				}
+
+				for _, vmssvm := range vmssvms.Values() {
+					if vmssvm.ID == nil {
+						return nil, fmt.Errorf("nil ID for vmss vm with id %q", *res.ID)
+					}
+
+					iv, err := vmssvmClient.GetInstanceView(ctx, resourceGroup, name, *vmssvm.InstanceID)
+					if err != nil {
+						return nil, fmt.Errorf("error fetching instance view for vm with id %q: %w", *res.ID, err)
+					}
+					if iv.Statuses == nil {
+						return nil, fmt.Errorf("instance view statuses returned for vm with id %q is null", *res.ID)
+					}
+					var running bool
+					for _, s := range *iv.Statuses {
+						if s.Code == nil {
+							continue
+						}
+						state := strings.ToLower(*s.Code)
+						prefix := "powerstate/"
+						if !strings.HasPrefix(state, prefix) {
+							continue
+						}
+						state = strings.TrimPrefix(state, prefix)
+						if state == "running" {
+							running = true
+							break
+						}
+					}
+					if !running {
+						continue
+					}
+
+					props := vmssvm.VirtualMachineScaleSetVMProperties
+					if props == nil {
+						return nil, fmt.Errorf("error fetching properties for vm with id %q: %w", *res.ID, err)
+					}
+					if props.NetworkProfile == nil {
+						return nil, fmt.Errorf("error fetching network profile for vm with id %q", *res.ID)
+					}
+
+					// Within the VM, catalog the various interfaces
+					for _, ifaceRef := range *props.NetworkProfile.NetworkInterfaces {
+						if ifaceRef.ID == nil {
+							return nil, fmt.Errorf("nil ID for network interface for vm with id %q", *res.ID)
+						}
+						ifName := extractResourceSuffix(*ifaceRef.ID)
+						iface, err := ifClient.GetVirtualMachineScaleSetNetworkInterface(ctx, resourceGroup, name, *vmssvm.InstanceID, ifName, "")
+						if err != nil {
+							return nil, fmt.Errorf("error fetching network interface with id %q: %w", *ifaceRef.ID, err)
+						}
+						if iface.InterfacePropertiesFormat == nil || iface.InterfacePropertiesFormat.IPConfigurations == nil {
+							continue
+						}
+						var netInfo networkInfo
+						for _, ipconf := range *iface.InterfacePropertiesFormat.IPConfigurations {
+							if ipconf.PrivateIPAddress != nil {
+								netInfo.IpAddresses = append(netInfo.IpAddresses, *ipconf.PrivateIPAddress)
+							}
+							if ipconf.PublicIPAddress != nil {
+								if ipconf.PublicIPAddress.ID == nil {
+									return nil, fmt.Errorf("ip configuration %q has public IP address info but nil id", *ipconf.ID)
+								}
+								//ipResGroup, ipName, err := splitId(*ipconf.PublicIPAddress.ID, constMsNetworkService, constPublicIpAddressesResource)
+								if err != nil {
+									return nil, fmt.Errorf("error splitting public ip address id %q: %w", *ipconf.PublicIPAddress.ID, err)
+								}
+								pipName := extractResourceSuffix(*ipconf.PublicIPAddress.ID)
+								pipInfo, err := pipClient.GetVirtualMachineScaleSetPublicIPAddress(ctx, resourceGroup, *vmss.Name, *vmssvm.InstanceID, ifName, *ipconf.Name, pipName, "")
+								if err != nil {
+									if err != nil {
+										return nil, fmt.Errorf("error fetching public IP information with resource group %q and name %q: %w", resourceGroup, pipName, err)
+									}
+								}
+								if pipInfo.PublicIPAddressPropertiesFormat == nil {
+									return nil, fmt.Errorf("nil public ip address properties format for public ip %q", *ipconf.PublicIPAddress.ID)
+								}
+								if pipInfo.PublicIPAddressPropertiesFormat.IPAddress != nil {
+									netInfo.IpAddresses = append(netInfo.IpAddresses, *pipInfo.PublicIPAddressPropertiesFormat.IPAddress)
+								}
+							}
+						}
+						vmToNetworkMap[*vmssvm.ID] = netInfo
+					}
+
+				}
+			}
 		}
 	}
 
 	ret := &pb.ListHostsResponse{}
 	for k, v := range vmToNetworkMap {
-		_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
-		if err != nil {
-			externalName = ""
+		var host *pb.ListHostsResponseHost
+		// see if we're dealing with a VMSS instance or a VM
+		if strings.Contains(k, constMsComputeService+"/"+constVirtualMachineScaleSetsResource) {
+			externalName, err := getExternalNameforVMSSInstance(k)
+			if err != nil {
+				externalName = ""
+			}
+			setId := getSetForVMSSInstance(k)
+			host = &pb.ListHostsResponseHost{
+				ExternalId:   k,
+				ExternalName: externalName,
+				IpAddresses:  v.IpAddresses,
+				SetIds:       resourceToSetMap[setId],
+			}
 		}
-
-		host := &pb.ListHostsResponseHost{
-			ExternalId:   k,
-			ExternalName: externalName,
-			IpAddresses:  v.IpAddresses,
-			SetIds:       resourceToSetMap[k],
+		if strings.Contains(k, constMsComputeService+"/"+constVirtualMachinesResource) {
+			_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
+			if err != nil {
+				externalName = ""
+			}
+			host = &pb.ListHostsResponseHost{
+				ExternalId:   k,
+				ExternalName: externalName,
+				IpAddresses:  v.IpAddresses,
+				SetIds:       resourceToSetMap[k],
+			}
 		}
 		ret.Hosts = append(ret.Hosts, host)
 	}
@@ -421,6 +573,35 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 		return "", "", fmt.Errorf("unexpected format of resource ID: %v", splitId)
 	}
 	return splitId[3], splitId[7], nil
+}
+
+// concatenate the vmss name with the vmss instance id to get the external name
+func getExternalNameforVMSSInstance(in string) (string, error) {
+	splitId := strings.Split(strings.TrimLeft(in, "/"), "/")
+	if len(splitId) != 10 ||
+		!strings.EqualFold(splitId[0], constSubscriptions) ||
+		!strings.EqualFold(splitId[2], constResourceGroups) ||
+		!strings.EqualFold(splitId[4], constProviders) ||
+		!strings.EqualFold(splitId[5], constMsComputeService) ||
+		!strings.EqualFold(splitId[6], constVirtualMachineScaleSetsResource) ||
+		!strings.EqualFold(splitId[8], constVirtualMachinesResource) {
+		return "", fmt.Errorf("unexpected format of virtual machine stateful set ID: %v", splitId)
+	}
+	return splitId[7] + "_" + splitId[9], nil
+}
+
+// extract the vmss name from the vmss instance id string
+func getSetForVMSSInstance(in string) string {
+	// Find the index of "virtualMachines" and take only the portion before it
+	trimmed := strings.Split(in, "/"+constVirtualMachinesResource)[0]
+
+	return trimmed
+}
+
+// helper function to return the last part of the interface ID
+func extractResourceSuffix(ifId string) string {
+	tokens := strings.Split(ifId, "/")
+	return tokens[len(tokens)-1]
 }
 
 // Returns an invalid argument error with the problematic fields included
