@@ -299,9 +299,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	vmToIfaceMap := make(map[string][]network.Interface)
 	{
 		var virtualMachineTypeSb strings.Builder
-		virtualMachineTypeSb.WriteString(constMsComputeService)
-		virtualMachineTypeSb.WriteString("/")
-		virtualMachineTypeSb.WriteString(constVirtualMachinesResource)
+		virtualMachineType := constMsComputeService + "/" + constVirtualMachinesResource
 		for _, res := range resourceInfos {
 			if strings.EqualFold(*res.Type, virtualMachineTypeSb.String()) {
 				resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
