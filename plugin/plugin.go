@@ -275,7 +275,9 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 				if val.Type == nil { // no point continuing if we can't validate that it's a VM
 					continue
 				}
-				if val.Type != nil && (!strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines") && !strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachineScaleSets")) {
+				isVm := strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines")
+				isVmss := strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachineScaleSets")
+				if val.Type != nil && !isVm && !isVmss {
 					// we have a resource that is not a VM, or a VM in a scale set, skip
 					continue
 				}
