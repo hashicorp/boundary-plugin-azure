@@ -5,7 +5,7 @@ Boundary](https://www.boundaryproject.io/) allowing dynamically sourcing hosts
 from Azure.
 
 Host sets created with this plugin define filters which select and group Virtual Machines 
-and Virtual Machine instances enscapsulated in both Flxible and Uniform Virtual Machine Scale Sets. 
+and Virtual Machine instances enscapsulated in both Flexible and Uniform Virtual Machine Scale Sets. 
 These host sets can in turn be added to targets within Boundary as host sources.
 
 At creation or update of a host catalog of this type, configuration of the
