@@ -4,9 +4,9 @@ This repo contains a Host-type plugin for [HashiCorp
 Boundary](https://www.boundaryproject.io/) allowing dynamically sourcing hosts
 from Azure.
 
-Host sets created with this plugin define filters which select and group like VM
-resources within Azure; these host sets can in turn be added to targets within
-Boundary as host sources.
+Host sets created with this plugin define filters which select and group Virtual Machines 
+and Virtual Machine instances enscapsulated in both Flxible and Uniform Virtual Machine Scale Sets. 
+These host sets can in turn be added to targets within Boundary as host sources.
 
 At creation or update of a host catalog of this type, configuration of the
 plugin is performed via the attribute/secret values passed to the create or
@@ -15,8 +15,6 @@ are indicated below with the valid fields.
 
 Current limitations of this plugin:
 
-- Only VMs can be added to host sets through this plugin, not any other type of
-  compute resource
 - A client secret must be generated against a registered application with any
   necessary permissions
 - For now, credential rotation must be disabled using the `disable_credential_rotation`
@@ -76,7 +74,7 @@ The following attributes are valid on an Azure host Set resource:
 
 ## Filters
 
-Azure Resource Manager is used to find matching VMs before their details are
+Azure Resource Manager is used to find matching VMs and VM Scale Sets before their details are
 looked up. There are some limitations with the filtering syntax; specifically,
 when using tags, other types of filters (such as on resource type) are not
 allowed. As a result, it will generally be useful to filter directly on tag
