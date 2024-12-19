@@ -4,24 +4,31 @@
 package plugin
 
 const (
-	constBaseUrl                           = "base_url"
-	constFilter                            = "filter"
-	constSubscriptionId                    = "subscription_id"
-	constClientId                          = "client_id"
-	constSecretValue                       = "secret_value"
-	constCredsLastRotatedTime              = "creds_last_rotated_time"
-	constSecretId                          = "secret_id"
-	constTenantId                          = "tenant_id"
-	constDefaultFilter                     = "resourceType eq 'Microsoft.Compute/virtualMachines' or resourceType eq 'Microsoft.Compute/virtualMachineScaleSets'"
-	constMsComputeService                  = "Microsoft.Compute"
-	constVirtualMachineScaleSetsResource   = "virtualMachineScaleSets"
-	constVirtualMachineScaleSetsVMResource = "virtualMachineScaleSets/virtualMachines"
-	constVirtualMachinesResource           = "virtualMachines"
-	constMsNetworkService                  = "Microsoft.Network"
-	constNetworkInterfacesResource         = "networkInterfaces"
-	constPublicIpAddressesResource         = "publicIPAddresses"
-	constSubscriptions                     = "subscriptions"
-	constResourceGroups                    = "resourceGroups"
-	constProviders                         = "providers"
-	constDisableCredentialRotation         = "disable_credential_rotation"
+	// Azure service constants
+	constMsComputeService = "Microsoft.Compute"
+	constMsNetworkService = "Microsoft.Network"
+	constSubscriptions    = "subscriptions"
+	constResourceGroups   = "resourceGroups"
+	constProviders        = "providers"
+
+	// Resource type constants
+	constVirtualMachinesResource         = "virtualMachines"
+	constVirtualMachineScaleSetsResource = "virtualMachineScaleSets"
+	constNetworkInterfacesResource       = "networkInterfaces"
+	constPublicIpAddressesResource       = "publicIPAddresses"
+
+	// Field constants
+	constFilter                    = "filter"
+	constDefaultFilter             = ""
+	constSecretId                  = "secret_id"
+	constSecretValue               = "secret_value"
+	constCredsLastRotatedTime      = "creds_last_rotated_time"
+	constDisableCredentialRotation = "disable_credential_rotation"
+	constSubscriptionId            = "subscription_id"
+	constTenantId                  = "tenant_id"
+	constClientId                  = "client_id"
+	constBaseUrl                   = "base_url"
+
+	// Worker pool configuration
+	constDefaultWorkers = 10
 )
