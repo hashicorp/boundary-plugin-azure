@@ -25,32 +25,53 @@ type vmssInstanceJob struct {
 	vmssName      string
 }
 
-func (p *AzurePlugin) processVMScaleSets(ctx context.Context, resourceInfos []resources.GenericResourceExpanded,
-	clients *azureClients, vmToNetworkMap map[string]networkInfo) error {
+func (p *AzurePlugin) processVMScaleSets(
+	ctx context.Context,
+	resourceInfos []resources.GenericResourceExpanded,
+	clients *azureClients) (map[string]networkInfo, error) {
+
+	// Initialize the map that we'll return
+	vmToNetworkMap := make(map[string]networkInfo)
+
+	// Pre-validate all resource IDs and create jobs slice
+	jobs := make([]vmssJob, 0, len(resourceInfos))
+	for _, res := range resourceInfos {
+		resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachineScaleSetsResource)
+		if err != nil {
+			return nil, fmt.Errorf("invalid vmss id %q: %w", *res.ID, err)
+		}
+		jobs = append(jobs, vmssJob{
+			resource:      res,
+			resourceGroup: resourceGroup,
+			name:          name,
+		})
+	}
 
 	// Create error group for worker management
 	g, ctx := errgroup.WithContext(ctx)
 
 	// Create job channel
-	jobs := make(chan vmssJob)
-
-	// Start workers
-	workerCount := constDefaultWorkers
-	if len(resourceInfos) < workerCount {
-		workerCount = len(resourceInfos)
-	}
+	jobsChan := make(chan vmssJob)
 
 	// Start worker pool
-	for i := 0; i < workerCount; i++ {
+	for i := 0; i < constDefaultWorkers; i++ {
 		g.Go(func() error {
-			for job := range jobs {
+			for job := range jobsChan {
 				vmss, err := clients.vmssClient.Get(ctx, job.resourceGroup, job.name, "")
 				if err != nil {
 					return fmt.Errorf("error fetching vmss with id %q: %w", *job.resource.ID, err)
 				}
 
+				// Check if VMSS properties exist
+				if vmss.VirtualMachineScaleSetProperties == nil {
+					continue
+				}
 				vmssProperties := vmss.VirtualMachineScaleSetProperties
-				// Skip Flexible orchestration mode VMSS
+
+				// Skip if OrchestrationMode is empty or Flexible
+				if vmssProperties.OrchestrationMode == "" {
+					continue
+				}
 				if vmssProperties.OrchestrationMode == compute.OrchestrationModeFlexible {
 					continue
 				}
@@ -65,33 +86,29 @@ func (p *AzurePlugin) processVMScaleSets(ctx context.Context, resourceInfos []re
 
 	// Send jobs to workers
 	go func() {
-		defer close(jobs)
-		for _, res := range resourceInfos {
-			select {
-			case <-ctx.Done():
+		defer close(jobsChan)
+		for _, job := range jobs {
+			if ctx.Err() != nil {
 				return
-			default:
 			}
-
-			resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachineScaleSetsResource)
-			if err != nil {
-				fmt.Printf("Warning: error splitting vmss id %q: %v\n", *res.ID, err)
-				continue
-			}
-
-			jobs <- vmssJob{
-				resource:      res,
-				resourceGroup: resourceGroup,
-				name:          name,
-			}
+			jobsChan <- job
 		}
 	}()
 
-	return g.Wait()
+	// Wait for all workers to complete
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return vmToNetworkMap, nil
 }
 
-func processVMSSInstancesParallel(ctx context.Context, vmss compute.VirtualMachineScaleSet,
-	resourceGroup string, clients *azureClients, vmToNetworkMap map[string]networkInfo) error {
+func processVMSSInstancesParallel(
+	ctx context.Context,
+	vmss compute.VirtualMachineScaleSet,
+	resourceGroup string,
+	clients *azureClients,
+	vmToNetworkMap map[string]networkInfo) error {
 
 	if vmss.Name == nil {
 		return fmt.Errorf("vmss name is nil")
@@ -112,7 +129,7 @@ func processVMSSInstancesParallel(ctx context.Context, vmss compute.VirtualMachi
 		instanceWorkerCount = len(vmssvms.Values())
 	}
 
-	var mu sync.Mutex
+	mu := &sync.Mutex{}
 
 	// Start instance worker pool
 	for i := 0; i < instanceWorkerCount; i++ {
@@ -123,7 +140,7 @@ func processVMSSInstancesParallel(ctx context.Context, vmss compute.VirtualMachi
 				}
 
 				if err := processVMSSInstanceParallel(ctx, job.vmssvm, job.resourceGroup,
-					job.vmssName, clients, vmToNetworkMap, &mu); err != nil {
+					job.vmssName, clients, vmToNetworkMap, mu); err != nil {
 					return fmt.Errorf("error processing vmss instance %s: %w", *job.vmssvm.ID, err)
 				}
 			}
@@ -152,9 +169,14 @@ func processVMSSInstancesParallel(ctx context.Context, vmss compute.VirtualMachi
 	return g.Wait()
 }
 
-func processVMSSInstanceParallel(ctx context.Context, vmssvm compute.VirtualMachineScaleSetVM,
-	resourceGroup, vmssName string, clients *azureClients,
-	vmToNetworkMap map[string]networkInfo, mu *sync.Mutex) error {
+func processVMSSInstanceParallel(
+	ctx context.Context,
+	vmssvm compute.VirtualMachineScaleSetVM,
+	resourceGroup,
+	vmssName string,
+	clients *azureClients,
+	vmToNetworkMap map[string]networkInfo,
+	mu *sync.Mutex) error {
 
 	if vmssvm.InstanceID == nil {
 		return fmt.Errorf("instance ID is nil")
@@ -184,8 +206,12 @@ func processVMSSInstanceParallel(ctx context.Context, vmssvm compute.VirtualMach
 }
 
 // VMSS Instance Status Check
-func isVMSSInstanceRunning(ctx context.Context, vmssvmClient *compute.VirtualMachineScaleSetVMsClient,
-	resourceGroup, vmssName string, instanceID *string) (bool, error) {
+func isVMSSInstanceRunning(
+	ctx context.Context,
+	vmssvmClient *compute.VirtualMachineScaleSetVMsClient,
+	resourceGroup,
+	vmssName string,
+	instanceID *string) (bool, error) {
 
 	if instanceID == nil {
 		return false, fmt.Errorf("instance ID is nil")
@@ -217,9 +243,38 @@ func isVMSSInstanceRunning(ctx context.Context, vmssvmClient *compute.VirtualMac
 }
 
 // Helper Functions
-func getSetForVMSSInstance(in string) string {
-	trimmed := strings.Split(in, "/"+constVirtualMachinesResource)[0]
-	return trimmed
+func getSetForVMSSInstance(in string) (string, error) {
+	if in == "" {
+		return "", fmt.Errorf("empty resource ID provided")
+	}
+
+	// Split the path into segments
+	segments := strings.Split(strings.TrimLeft(in, "/"), "/")
+
+	// Check if this is a VMSS path by looking for required segments
+	if len(segments) < 8 ||
+		!strings.EqualFold(segments[0], constSubscriptions) ||
+		!strings.EqualFold(segments[2], constResourceGroups) ||
+		!strings.EqualFold(segments[4], constProviders) ||
+		!strings.EqualFold(segments[5], constMsComputeService) ||
+		!strings.EqualFold(segments[6], constVirtualMachineScaleSetsResource) {
+		return "", fmt.Errorf("not a valid VMSS resource ID: %s", in)
+	}
+
+	// Reconstruct the VMSS path (everything up to but not including virtualMachines)
+	vmssPath := "/" + strings.Join(segments[:8], "/")
+
+	// Additional validation: if the path contains virtualMachines, it should be in the correct position
+	for i, segment := range segments[8:] {
+		if strings.EqualFold(segment, constVirtualMachinesResource) {
+			if i != 0 { // virtualMachines should be immediately after VMSS name
+				return "", fmt.Errorf("unexpected virtualMachines segment position in resource ID: %s", in)
+			}
+			break
+		}
+	}
+
+	return vmssPath, nil
 }
 
 func getExternalNameforVMSSInstance(in string) (string, error) {

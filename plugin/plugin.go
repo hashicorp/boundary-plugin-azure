@@ -27,10 +27,6 @@ import (
 	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
 )
 
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
-
 // AzurePlugin implements the HostPluginServiceServer interface
 type AzurePlugin struct {
 	pb.UnimplementedHostPluginServiceServer
@@ -52,9 +48,6 @@ type azureClients struct {
 	pipClient    *network.PublicIPAddressesClient
 }
 
-// -----------------------------------------------------------------------------
-// Primary Interface Functions
-// -----------------------------------------------------------------------------
 func (p *AzurePlugin) OnCreateCatalog(_ context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
 	if err := validateCatalog(req.GetCatalog()); err != nil {
 		return nil, err
@@ -161,7 +154,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		len(vmssResources))
 
 	// Create mutex and errgroup for parallel processing
-	var mu sync.Mutex
+	mu := &sync.Mutex{}
 	vmToNetworkMap := make(map[string]networkInfo)
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -170,9 +163,8 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	if len(vmResources) > 0 {
 		g.Go(func() error {
 			vmStart := time.Now()
-			vmNetworkMap := make(map[string]networkInfo)
-
-			if err := p.processStandardVMs(ctx, vmResources, clients, vmNetworkMap); err != nil {
+			vmNetworkMap, err := p.processStandardVMs(ctx, vmResources, clients)
+			if err != nil {
 				return fmt.Errorf("processing VMs: %w", err)
 			}
 
@@ -191,9 +183,8 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	if len(vmssResources) > 0 {
 		g.Go(func() error {
 			vmssStart := time.Now()
-			vmssNetworkMap := make(map[string]networkInfo)
-
-			if err := p.processVMScaleSets(ctx, vmssResources, clients, vmssNetworkMap); err != nil {
+			vmssNetworkMap, err := p.processVMScaleSets(ctx, vmssResources, clients)
+			if err != nil {
 				return fmt.Errorf("processing VMSS: %w", err)
 			}
 
@@ -215,7 +206,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	fmt.Printf("Total processing time: %v\n", time.Since(processingStart))
 
 	responseStart := time.Now()
-	response := p.buildHostsResponse(vmToNetworkMap, resourceToSetMap)
+	response := buildHostsResponse(vmToNetworkMap, resourceToSetMap)
 	fmt.Printf("Built response in %v (Total hosts: %d)\n",
 		time.Since(responseStart),
 		len(vmToNetworkMap))
@@ -248,29 +239,32 @@ func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatal
 	}, err
 }
 
-// -----------------------------------------------------------------------------
-// Response Building Functions
-// -----------------------------------------------------------------------------
-func (p *AzurePlugin) buildHostsResponse(vmToNetworkMap map[string]networkInfo,
+func buildHostsResponse(
+	vmToNetworkMap map[string]networkInfo,
 	resourceToSetMap map[string][]string) *pb.ListHostsResponse {
 
 	ret := &pb.ListHostsResponse{}
 
 	for resourceID, networkInfo := range vmToNetworkMap {
-		host := p.createHostFromResource(resourceID, networkInfo, resourceToSetMap)
-		if host != nil {
-			ret.Hosts = append(ret.Hosts, host)
+		host, err := createHostFromResource(resourceID, networkInfo, resourceToSetMap)
+		if err != nil {
+			fmt.Printf("Error creating host from resource: %v\n", err)
+			continue
 		}
+		ret.Hosts = append(ret.Hosts, host)
 	}
 
 	return ret
 }
 
-func (p *AzurePlugin) createHostFromResource(resourceID string, networkInfo networkInfo,
-	resourceToSetMap map[string][]string) *pb.ListHostsResponseHost {
+func createHostFromResource(resourceID string, networkInfo networkInfo,
+	resourceToSetMap map[string][]string) (*pb.ListHostsResponseHost, error) {
 
 	// Extract the resource type from the ID
-	resourceType := extractResourceType(resourceID)
+	resourceType, err := extractResourceType(resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resource ID: %w", err)
+	}
 
 	switch resourceType {
 	case constVirtualMachineScaleSetsResource:
@@ -279,13 +273,16 @@ func (p *AzurePlugin) createHostFromResource(resourceID string, networkInfo netw
 			externalName = "" // Use empty name if there's an error
 		}
 
-		setID := getSetForVMSSInstance(resourceID)
+		setId, err := getSetForVMSSInstance(resourceID)
+		if err != nil {
+			return nil, fmt.Errorf("could not determine set for resource ID: %w", err)
+		}
 		return &pb.ListHostsResponseHost{
 			ExternalId:   resourceID,
 			ExternalName: externalName,
 			IpAddresses:  networkInfo.IpAddresses,
-			SetIds:       resourceToSetMap[setID],
-		}
+			SetIds:       resourceToSetMap[setId],
+		}, nil
 
 	case constVirtualMachinesResource:
 		_, externalName, err := splitId(resourceID, constMsComputeService, constVirtualMachinesResource)
@@ -298,16 +295,13 @@ func (p *AzurePlugin) createHostFromResource(resourceID string, networkInfo netw
 			ExternalName: externalName,
 			IpAddresses:  networkInfo.IpAddresses,
 			SetIds:       resourceToSetMap[resourceID],
-		}
+		}, nil
 
 	default:
-		return nil // Resource type not supported
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType) // Return explicit error
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Resource Management Functions
-// -----------------------------------------------------------------------------
 func (p *AzurePlugin) initializeAzureResources(
 	catalog *hostcatalogs.HostCatalog,
 	secrets *structpb.Struct) (*azureClients, error) {
@@ -449,7 +443,7 @@ func getSetFilter(set *hostsets.HostSet) string {
 			return filter
 		}
 	}
-	return constDefaultFilter
+	return ""
 }
 
 func validateHostSet(set *hostsets.HostSet) error {
@@ -465,10 +459,6 @@ func validateHostSet(set *hostsets.HostSet) error {
 	}
 	return nil
 }
-
-// -----------------------------------------------------------------------------
-// Helper and Utility Functions
-// -----------------------------------------------------------------------------
 
 // ID Parsing Functions
 func splitId(in, expectedService, expectedResource string) (string, string, error) {
@@ -489,14 +479,36 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 	return splitId[3], splitId[7], nil
 }
 
-func extractResourceType(resourceID string) string {
-	parts := strings.Split(resourceID, "/")
-	for i, part := range parts {
-		if strings.EqualFold(part, constMsComputeService) && i+1 < len(parts) {
-			return parts[i+1]
-		}
+func extractResourceType(resourceID string) (string, error) {
+	if resourceID == "" {
+		return "", fmt.Errorf("empty resource ID provided")
 	}
-	return ""
+
+	parts := strings.Split(strings.TrimLeft(resourceID, "/"), "/")
+
+	// Validate minimum length and basic structure
+	if len(parts) < 6 {
+		return "", fmt.Errorf("resource ID too short: %s", resourceID)
+	}
+
+	// Check for required segments in correct positions
+	if !strings.EqualFold(parts[0], constSubscriptions) ||
+		!strings.EqualFold(parts[2], constResourceGroups) ||
+		!strings.EqualFold(parts[4], constProviders) {
+		return "", fmt.Errorf("malformed resource ID, missing required segments: %s", resourceID)
+	}
+
+	// Check for Microsoft.Compute in correct position
+	if !strings.EqualFold(parts[5], constMsComputeService) {
+		return "", nil // Not a compute resource, return empty string without error
+	}
+
+	// Ensure there's a resource type after Microsoft.Compute
+	if len(parts) < 7 {
+		return "", fmt.Errorf("no resource type found after Microsoft.Compute: %s", resourceID)
+	}
+
+	return parts[6], nil
 }
 
 // Validation Functions

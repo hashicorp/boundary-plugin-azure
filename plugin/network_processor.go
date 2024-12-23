@@ -9,47 +9,44 @@ import (
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 )
 
-// -----------------------------------------------------------------------------
-// Types
-// -----------------------------------------------------------------------------
 type networkInfo struct {
 	IpAddresses []string
 }
 
 // Common interface for IP configuration processing
 type networkProcessor interface {
-	processIPConfigurations(ctx context.Context, ipConfigs *[]network.InterfaceIPConfiguration) error
-	getPublicIPAddress(ctx context.Context, publicIPRef *network.PublicIPAddress, ipConf *network.InterfaceIPConfiguration) (*string, error)
+	processIPConfigurations(ctx context.Context, ipConfigs []network.InterfaceIPConfiguration) (*networkInfo, error)
+	getPublicIPAddress(ctx context.Context, publicIPRef *network.PublicIPAddress, ipConf *network.InterfaceIPConfiguration) (string, error)
 	getNetworkInterface(ctx context.Context, interfaceID string) (*network.Interface, error)
 }
 
 // Standard VM network processor
 type vmNetworkProcessor struct {
-	clients       *azureClients
-	netInfo       *networkInfo
+	clients *azureClients
+	//netInfo       *networkInfo
 	resourceGroup string
 }
 
 // VMSS network processor
 type vmssNetworkProcessor struct {
-	clients       *azureClients
-	netInfo       *networkInfo
+	clients *azureClients
+	//netInfo       *networkInfo
 	resourceGroup string
 	vmssName      string
 	instanceID    string
 	ifName        string
 }
 
-// -----------------------------------------------------------------------------
-// Common Network Processing Logic
-// -----------------------------------------------------------------------------
-func processNetworkProfile(ctx context.Context, interfaces *[]compute.NetworkInterfaceReference,
-	processor networkProcessor) error {
-	if interfaces == nil {
+func processNetworkProfile(
+	ctx context.Context,
+	interfaces []compute.NetworkInterfaceReference,
+	processor networkProcessor,
+	targetInfo *networkInfo) error {
+	if len(interfaces) == 0 {
 		return fmt.Errorf("nil network interfaces")
 	}
 
-	for _, ifaceRef := range *interfaces {
+	for _, ifaceRef := range interfaces {
 		if ifaceRef.ID == nil {
 			return fmt.Errorf("nil ID for network interface")
 		}
@@ -63,16 +60,15 @@ func processNetworkProfile(ctx context.Context, interfaces *[]compute.NetworkInt
 			continue
 		}
 
-		if err := processor.processIPConfigurations(ctx, iface.InterfacePropertiesFormat.IPConfigurations); err != nil {
+		networkInfo, err := processor.processIPConfigurations(ctx, *iface.InterfacePropertiesFormat.IPConfigurations)
+		if err != nil {
 			return err
 		}
+		targetInfo.IpAddresses = append(targetInfo.IpAddresses, networkInfo.IpAddresses...)
 	}
 	return nil
 }
 
-// -----------------------------------------------------------------------------
-// VM Network Interface Implementation
-// -----------------------------------------------------------------------------
 func (p *vmNetworkProcessor) getNetworkInterface(ctx context.Context, interfaceID string) (*network.Interface, error) {
 	ifResGroup, ifName, err := splitId(interfaceID, constMsNetworkService, constNetworkInterfacesResource)
 	if err != nil {
@@ -87,54 +83,57 @@ func (p *vmNetworkProcessor) getNetworkInterface(ctx context.Context, interfaceI
 	return &iface, nil
 }
 
-func (p *vmNetworkProcessor) processIPConfigurations(ctx context.Context,
-	ipConfigs *[]network.InterfaceIPConfiguration) error {
-	for _, ipconf := range *ipConfigs {
+func (p *vmNetworkProcessor) processIPConfigurations(
+	ctx context.Context,
+	ipConfigs []network.InterfaceIPConfiguration) (*networkInfo, error) {
+	tempInfo := &networkInfo{}
+	for _, ipconf := range ipConfigs {
 		// Process private IP
 		if ipconf.PrivateIPAddress != nil {
-			p.netInfo.IpAddresses = append(p.netInfo.IpAddresses, *ipconf.PrivateIPAddress)
+			tempInfo.IpAddresses = append(tempInfo.IpAddresses, *ipconf.PrivateIPAddress)
 		}
 
 		// Process public IP if available
 		if ipconf.PublicIPAddress != nil {
 			ipAddress, err := p.getPublicIPAddress(ctx, ipconf.PublicIPAddress, &ipconf)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if ipAddress != nil {
-				p.netInfo.IpAddresses = append(p.netInfo.IpAddresses, *ipAddress)
-			}
+			tempInfo.IpAddresses = append(tempInfo.IpAddresses, ipAddress)
 		}
 	}
-	return nil
+	return tempInfo, nil
 }
 
-func (p *vmNetworkProcessor) getPublicIPAddress(ctx context.Context,
-	publicIP *network.PublicIPAddress, ipConf *network.InterfaceIPConfiguration) (*string, error) {
+func (p *vmNetworkProcessor) getPublicIPAddress(
+	ctx context.Context,
+	publicIP *network.PublicIPAddress,
+	ipConf *network.InterfaceIPConfiguration) (string, error) {
 	if publicIP.ID == nil {
-		return nil, fmt.Errorf("ip configuration has public IP address info but nil id")
+		return "", fmt.Errorf("ip configuration has public IP address info but nil id")
 	}
 
 	ipResGroup, ipName, err := splitId(*publicIP.ID, constMsNetworkService, constPublicIpAddressesResource)
 	if err != nil {
-		return nil, fmt.Errorf("error splitting public ip address id: %w", err)
+		return "", fmt.Errorf("error splitting public ip address id: %w", err)
 	}
 
 	pipInfo, err := p.clients.pipClient.Get(ctx, ipResGroup, ipName, "")
 	if err != nil {
-		return nil, fmt.Errorf("error fetching public IP information: %w", err)
+		return "", fmt.Errorf("error fetching public IP information: %w", err)
 	}
 
 	if pipInfo.PublicIPAddressPropertiesFormat == nil {
-		return nil, fmt.Errorf("nil public ip address properties format for public ip %q", *publicIP.ID)
+		return "", fmt.Errorf("nil public ip address properties format for public ip %q", *publicIP.ID)
 	}
 
-	return pipInfo.PublicIPAddressPropertiesFormat.IPAddress, nil
+	if pipInfo.PublicIPAddressPropertiesFormat.IPAddress == nil {
+		return "", fmt.Errorf("nil IP address for public ip %q", *publicIP.ID)
+	}
+
+	return *pipInfo.PublicIPAddressPropertiesFormat.IPAddress, nil
 }
 
-// -----------------------------------------------------------------------------
-// VMSS Network Interface Implementation
-// -----------------------------------------------------------------------------
 func (p *vmssNetworkProcessor) getNetworkInterface(ctx context.Context, interfaceID string) (*network.Interface, error) {
 	ifName := extractResourceSuffix(interfaceID)
 	p.ifName = ifName // Store the interface name for use in public IP processing
@@ -153,32 +152,34 @@ func (p *vmssNetworkProcessor) getNetworkInterface(ctx context.Context, interfac
 	return &iface, nil
 }
 
-func (p *vmssNetworkProcessor) processIPConfigurations(ctx context.Context,
-	ipConfigs *[]network.InterfaceIPConfiguration) error {
-	for _, ipconf := range *ipConfigs {
+func (p *vmssNetworkProcessor) processIPConfigurations(
+	ctx context.Context,
+	ipConfigs []network.InterfaceIPConfiguration) (*networkInfo, error) {
+	tempInfo := &networkInfo{}
+	for _, ipconf := range ipConfigs {
 		// Process private IP
 		if ipconf.PrivateIPAddress != nil {
-			p.netInfo.IpAddresses = append(p.netInfo.IpAddresses, *ipconf.PrivateIPAddress)
+			tempInfo.IpAddresses = append(tempInfo.IpAddresses, *ipconf.PrivateIPAddress)
 		}
 
 		// Process public IP if available
 		if ipconf.PublicIPAddress != nil {
 			ipAddress, err := p.getPublicIPAddress(ctx, ipconf.PublicIPAddress, &ipconf)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if ipAddress != nil {
-				p.netInfo.IpAddresses = append(p.netInfo.IpAddresses, *ipAddress)
-			}
+			tempInfo.IpAddresses = append(tempInfo.IpAddresses, ipAddress)
 		}
 	}
-	return nil
+	return tempInfo, nil
 }
 
-func (p *vmssNetworkProcessor) getPublicIPAddress(ctx context.Context,
-	publicIP *network.PublicIPAddress, ipConf *network.InterfaceIPConfiguration) (*string, error) {
+func (p *vmssNetworkProcessor) getPublicIPAddress(
+	ctx context.Context,
+	publicIP *network.PublicIPAddress,
+	ipConf *network.InterfaceIPConfiguration) (string, error) {
 	if publicIP == nil || publicIP.ID == nil || ipConf.Name == nil {
-		return nil, fmt.Errorf("invalid public IP configuration")
+		return "", fmt.Errorf("invalid public IP configuration")
 	}
 
 	pipName := extractResourceSuffix(*publicIP.ID)
@@ -192,21 +193,26 @@ func (p *vmssNetworkProcessor) getPublicIPAddress(ctx context.Context,
 		pipName,
 		"")
 	if err != nil {
-		return nil, fmt.Errorf("error fetching public IP information: %w", err)
+		return "", fmt.Errorf("error fetching public IP information: %w", err)
 	}
 
 	if pipInfo.PublicIPAddressPropertiesFormat == nil {
-		return nil, fmt.Errorf("nil public ip address properties format")
+		return "", fmt.Errorf("nil public ip address properties format")
 	}
 
-	return pipInfo.PublicIPAddressPropertiesFormat.IPAddress, nil
+	if pipInfo.PublicIPAddressPropertiesFormat.IPAddress == nil {
+		return "", fmt.Errorf("nil IP address for public ip %q", *publicIP.ID)
+	}
+
+	return *pipInfo.PublicIPAddressPropertiesFormat.IPAddress, nil
 }
 
-// -----------------------------------------------------------------------------
-// Entry Points
-// -----------------------------------------------------------------------------
-func processVMNetworkInterfaces(ctx context.Context, vm compute.VirtualMachine,
-	clients *azureClients, resourceGroup string, netInfo *networkInfo) error {
+func processVMNetworkInterfaces(
+	ctx context.Context,
+	vm compute.VirtualMachine,
+	clients *azureClients,
+	resourceGroup string,
+	netInfo *networkInfo) error {
 
 	if vm.VirtualMachineProperties == nil || vm.VirtualMachineProperties.NetworkProfile == nil {
 		return fmt.Errorf("error fetching network profile")
@@ -214,15 +220,18 @@ func processVMNetworkInterfaces(ctx context.Context, vm compute.VirtualMachine,
 
 	processor := &vmNetworkProcessor{
 		clients:       clients,
-		netInfo:       netInfo,
 		resourceGroup: resourceGroup,
 	}
 
-	return processNetworkProfile(ctx, vm.VirtualMachineProperties.NetworkProfile.NetworkInterfaces, processor)
+	return processNetworkProfile(ctx, *vm.VirtualMachineProperties.NetworkProfile.NetworkInterfaces, processor, netInfo)
 }
 
-func processVMSSNetworkInterfaces(ctx context.Context, vmssvm compute.VirtualMachineScaleSetVM,
-	resourceGroup, vmssName string, clients *azureClients, netInfo *networkInfo) error {
+func processVMSSNetworkInterfaces(
+	ctx context.Context,
+	vmssvm compute.VirtualMachineScaleSetVM,
+	resourceGroup, vmssName string,
+	clients *azureClients,
+	netInfo *networkInfo) error {
 
 	if vmssvm.VirtualMachineScaleSetVMProperties == nil ||
 		vmssvm.VirtualMachineScaleSetVMProperties.NetworkProfile == nil {
@@ -235,7 +244,6 @@ func processVMSSNetworkInterfaces(ctx context.Context, vmssvm compute.VirtualMac
 
 	processor := &vmssNetworkProcessor{
 		clients:       clients,
-		netInfo:       netInfo,
 		resourceGroup: resourceGroup,
 		vmssName:      vmssName,
 		instanceID:    *vmssvm.InstanceID,
@@ -243,12 +251,9 @@ func processVMSSNetworkInterfaces(ctx context.Context, vmssvm compute.VirtualMac
 	}
 
 	return processNetworkProfile(ctx,
-		vmssvm.VirtualMachineScaleSetVMProperties.NetworkProfile.NetworkInterfaces, processor)
+		*vmssvm.VirtualMachineScaleSetVMProperties.NetworkProfile.NetworkInterfaces, processor, netInfo)
 }
 
-// -----------------------------------------------------------------------------
-// Helper Functions
-// -----------------------------------------------------------------------------
 // extractResourceSuffix extracts the resource name from the end of an Azure resource ID
 func extractResourceSuffix(resourceID string) string {
 	parts := strings.Split(resourceID, "/")

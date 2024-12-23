@@ -19,7 +19,6 @@ const (
 
 	// Field constants
 	constFilter                    = "filter"
-	constDefaultFilter             = ""
 	constSecretId                  = "secret_id"
 	constSecretValue               = "secret_value"
 	constCredsLastRotatedTime      = "creds_last_rotated_time"
@@ -30,5 +29,5 @@ const (
 	constBaseUrl                   = "base_url"
 
 	// Worker pool configuration
-	constDefaultWorkers = 10
+	constDefaultWorkers = 1000
 )

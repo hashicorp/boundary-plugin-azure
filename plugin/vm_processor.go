@@ -19,27 +19,38 @@ type vmJob struct {
 }
 
 func (p *AzurePlugin) processStandardVMs(ctx context.Context, resourceInfos []resources.GenericResourceExpanded,
-	clients *azureClients, vmToNetworkMap map[string]networkInfo) error {
+	clients *azureClients) (map[string]networkInfo, error) {
+
+	// Initialize the map that we'll return
+	vmToNetworkMap := make(map[string]networkInfo)
+
+	// Pre-validate all resource IDs and create jobs slice
+	jobs := make([]vmJob, 0, len(resourceInfos))
+	for _, res := range resourceInfos {
+		resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
+		if err != nil {
+			return nil, fmt.Errorf("invalid vm id %q: %w", *res.ID, err)
+		}
+		jobs = append(jobs, vmJob{
+			resource:      res,
+			resourceGroup: resourceGroup,
+			name:          name,
+		})
+	}
 
 	// Create error group for worker management
 	g, ctx := errgroup.WithContext(ctx)
 
 	// Create job channel
-	jobs := make(chan vmJob)
-
-	// Start workers
-	workerCount := constDefaultWorkers
-	if len(resourceInfos) < workerCount {
-		workerCount = len(resourceInfos)
-	}
+	jobsChan := make(chan vmJob)
 
 	// Result handling
-	var mu sync.Mutex
+	mu := &sync.Mutex{}
 
 	// Start worker pool
-	for i := 0; i < workerCount; i++ {
+	for i := 0; i < constDefaultWorkers; i++ {
 		g.Go(func() error {
-			for job := range jobs {
+			for job := range jobsChan {
 				// Process single VM
 				vm, err := clients.vmClient.Get(ctx, job.resourceGroup, job.name, "")
 				if err != nil {
@@ -60,12 +71,9 @@ func (p *AzurePlugin) processStandardVMs(ctx context.Context, resourceInfos []re
 					return err
 				}
 
-				// Thread-safe map update - scope the lock to just the map update
-				func() {
-					mu.Lock()
-					defer mu.Unlock()
-					vmToNetworkMap[*job.resource.ID] = netInfo
-				}()
+				mu.Lock()
+				vmToNetworkMap[*job.resource.ID] = netInfo
+				mu.Unlock()
 			}
 			return nil
 		})
@@ -73,39 +81,30 @@ func (p *AzurePlugin) processStandardVMs(ctx context.Context, resourceInfos []re
 
 	// Send jobs to workers
 	go func() {
-		defer close(jobs)
-		for _, res := range resourceInfos {
+		defer close(jobsChan)
+		for _, job := range jobs {
 			// Check context cancellation
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return
-			default:
 			}
-
-			resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
-			if err != nil {
-				// Can't send error through channel, so we'll skip this item
-				fmt.Printf("Warning: error splitting vm id %q: %v\n", *res.ID, err)
-				continue
-			}
-
-			job := vmJob{
-				resource:      res,
-				resourceGroup: resourceGroup,
-				name:          name,
-			}
-
-			jobs <- job
+			jobsChan <- job
 		}
 	}()
 
 	// Wait for all workers to complete
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return vmToNetworkMap, nil
 }
 
 // VM Status Check
-func isVMRunning(ctx context.Context, vmClient *compute.VirtualMachinesClient,
-	resourceGroup, name string) (bool, error) {
+func isVMRunning(
+	ctx context.Context,
+	vmClient *compute.VirtualMachinesClient,
+	resourceGroup,
+	name string) (bool, error) {
 
 	iv, err := vmClient.InstanceView(ctx, resourceGroup, name)
 	if err != nil {
