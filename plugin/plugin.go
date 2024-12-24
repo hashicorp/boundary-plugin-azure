@@ -125,44 +125,30 @@ func (p *AzurePlugin) OnUpdateSet(_ context.Context, req *pb.OnUpdateSetRequest)
 }
 
 func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (*pb.ListHostsResponse, error) {
-	startTime := time.Now()
-	defer func() {
-		fmt.Printf("ListHosts completed in %v\n", time.Since(startTime))
-	}()
-
 	if len(req.GetSets()) == 0 {
 		return &pb.ListHostsResponse{}, nil
 	}
 
 	// Initialize Azure clients and authorization
-	clientStart := time.Now()
 	clients, err := p.initializeAzureResources(req.GetCatalog(), req.GetPersisted().GetSecrets())
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Azure clients initialized in %v\n", time.Since(clientStart))
 
 	// Find matching resources and map them to sets
-	findStart := time.Now()
 	vmResources, vmssResources, resourceToSetMap, err := p.findMatchingResources(ctx, req.GetSets(), clients.resClient)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Resources discovered in %v (Found %d VMs, %d VMSS)\n",
-		time.Since(findStart),
-		len(vmResources),
-		len(vmssResources))
 
 	// Create mutex and errgroup for parallel processing
 	mu := &sync.Mutex{}
 	vmToNetworkMap := make(map[string]networkInfo)
 	g, ctx := errgroup.WithContext(ctx)
 
-	processingStart := time.Now()
 	// Process standard VMs in parallel if they exist
 	if len(vmResources) > 0 {
 		g.Go(func() error {
-			vmStart := time.Now()
 			vmNetworkMap, err := p.processStandardVMs(ctx, vmResources, clients)
 			if err != nil {
 				return fmt.Errorf("processing VMs: %w", err)
@@ -173,8 +159,6 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 			for k, v := range vmNetworkMap {
 				vmToNetworkMap[k] = v
 			}
-
-			fmt.Printf("Processed %d VMs in %v\n", len(vmResources), time.Since(vmStart))
 			return nil
 		})
 	}
@@ -182,7 +166,6 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	// Process VMSS in parallel if they exist
 	if len(vmssResources) > 0 {
 		g.Go(func() error {
-			vmssStart := time.Now()
 			vmssNetworkMap, err := p.processVMScaleSets(ctx, vmssResources, clients)
 			if err != nil {
 				return fmt.Errorf("processing VMSS: %w", err)
@@ -193,8 +176,6 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 			for k, v := range vmssNetworkMap {
 				vmToNetworkMap[k] = v
 			}
-
-			fmt.Printf("Processed %d VMSS in %v\n", len(vmssResources), time.Since(vmssStart))
 			return nil
 		})
 	}
@@ -203,14 +184,8 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	fmt.Printf("Total processing time: %v\n", time.Since(processingStart))
 
-	responseStart := time.Now()
 	response := buildHostsResponse(vmToNetworkMap, resourceToSetMap)
-	fmt.Printf("Built response in %v (Total hosts: %d)\n",
-		time.Since(responseStart),
-		len(vmToNetworkMap))
-
 	return response, nil
 }
 
