@@ -380,11 +380,13 @@ func (p *AzurePlugin) initializeAzureResources(
 
 func (p *AzurePlugin) findMatchingResources(ctx context.Context,
 	sets []*hostsets.HostSet,
-	resClient *resources.Client) ([]resources.GenericResourceExpanded, []resources.GenericResourceExpanded, map[string][]string, error) {
+	resClient *resources.Client) (
+	vmResources []resources.GenericResourceExpanded,
+	vmssResources []resources.GenericResourceExpanded,
+	resourceToSetMap map[string][]string,
+	_ error) {
 
-	resourceToSetMap := make(map[string][]string, len(sets)*10)
-	var vmResources []resources.GenericResourceExpanded
-	var vmssResources []resources.GenericResourceExpanded
+	resourceToSetMap = make(map[string][]string, len(sets)*10) // Pre-allocate map size
 
 	for _, set := range sets {
 		if err := validateHostSet(set); err != nil {
@@ -392,8 +394,14 @@ func (p *AzurePlugin) findMatchingResources(ctx context.Context,
 		}
 
 		filter := getSetFilter(set)
-		if err := listAndFilterResources(ctx, resClient, filter, set.GetId(), &vmResources, &vmssResources, resourceToSetMap); err != nil {
+		setVMResources, setVMSSResources, setResourceToSetMap, err := listAndFilterResources(ctx, resClient, filter, set.GetId())
+		if err != nil {
 			return nil, nil, nil, err
+		}
+		vmResources = append(vmResources, setVMResources...)
+		vmssResources = append(vmssResources, setVMSSResources...)
+		for k, v := range setResourceToSetMap {
+			resourceToSetMap[k] = append(resourceToSetMap[k], v...)
 		}
 	}
 
@@ -402,20 +410,22 @@ func (p *AzurePlugin) findMatchingResources(ctx context.Context,
 
 func listAndFilterResources(ctx context.Context,
 	resClient *resources.Client,
-	filter, setID string,
-	vmResources *[]resources.GenericResourceExpanded,
-	vmssResources *[]resources.GenericResourceExpanded,
-	resourceToSetMap map[string][]string) error {
+	filter, setID string) (
+	vmResources []resources.GenericResourceExpanded,
+	vmssResources []resources.GenericResourceExpanded,
+	resourceToSetMap map[string][]string,
+	_ error) {
 
+	resourceToSetMap = make(map[string][]string)
 	iter, err := resClient.ListComplete(ctx, filter, "", nil)
 	if err != nil {
-		return fmt.Errorf("error listing resources: %w", err)
+		return nil, nil, nil, fmt.Errorf("error listing resources: %w", err)
 	}
 
 	for iter.NotDone() {
 		val := iter.Value()
 		if err := iter.NextWithContext(ctx); err != nil {
-			return fmt.Errorf("error iterating resources: %w", err)
+			return nil, nil, nil, fmt.Errorf("error iterating resources: %w", err)
 		}
 
 		if val.ID == nil || val.Type == nil {
@@ -424,15 +434,15 @@ func listAndFilterResources(ctx context.Context,
 		virtualMachineType := constMsComputeService + "/" + constVirtualMachinesResource
 		virtualMachineScaleSetType := constMsComputeService + "/" + constVirtualMachineScaleSetsResource
 		if strings.EqualFold(*val.Type, virtualMachineType) {
-			*vmResources = append(*vmResources, val)
+			vmResources = append(vmResources, val)
 			resourceToSetMap[*val.ID] = append(resourceToSetMap[*val.ID], setID)
 		} else if strings.EqualFold(*val.Type, virtualMachineScaleSetType) {
-			*vmssResources = append(*vmssResources, val)
+			vmssResources = append(vmssResources, val)
 			resourceToSetMap[*val.ID] = append(resourceToSetMap[*val.ID], setID)
 		}
 	}
 
-	return nil
+	return vmResources, vmssResources, resourceToSetMap, nil
 }
 
 // Resource Filter Management
