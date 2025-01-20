@@ -7,6 +7,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -448,7 +450,7 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 			Id: "set1",
 			Attrs: &hostsets.HostSet_Attributes{
 				Attributes: wrapMap(t, map[string]interface{}{
-					constFilter: constDefaultFilter,
+					constFilter: "",
 				}),
 			},
 		},
@@ -456,7 +458,7 @@ func testGetHostStructs(t *testing.T) (*hostcatalogs.HostCatalog, []*hostsets.Ho
 			Id: "set2",
 			Attrs: &hostsets.HostSet_Attributes{
 				Attributes: wrapMap(t, map[string]interface{}{
-					constFilter: constDefaultFilter,
+					constFilter: "",
 				}),
 			},
 		},
@@ -504,4 +506,288 @@ func testCreateInitialSecret(t *testing.T, hostCatalog *hostcatalogs.HostCatalog
 	waitForCreds(t, authzInfo, true)
 
 	return authzInfo, initialCred, cleanup
+}
+
+func TestSplitId(t *testing.T) {
+	tests := []struct {
+		name             string
+		input            string
+		expectedService  string
+		expectedResource string
+		wantRG           string
+		wantName         string
+		wantErr          bool
+	}{
+		{
+			name:             "valid resource id",
+			input:            "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "rg1",
+			wantName:         "vm1",
+			wantErr:          false,
+		},
+		{
+			name:             "valid with different case",
+			input:            "/SUBSCRIPTIONS/sub1/RESOURCEGROUPS/rg1/PROVIDERS/MICROSOFT.COMPUTE/VIRTUALMACHINES/vm1",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "rg1",
+			wantName:         "vm1",
+			wantErr:          false,
+		},
+		{
+			name:             "invalid - trailing slash",
+			input:            "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1/",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "",
+			wantName:         "",
+			wantErr:          true,
+		},
+		{
+			name:             "invalid - wrong service",
+			input:            "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/virtualMachines/vm1",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "",
+			wantName:         "",
+			wantErr:          true,
+		},
+		{
+			name:             "invalid - wrong resource type",
+			input:            "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/diskEncryptionSets/des1",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "",
+			wantName:         "",
+			wantErr:          true,
+		},
+		{
+			name:             "invalid - missing segments",
+			input:            "/subscriptions/sub1/resourceGroups/rg1",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "",
+			wantName:         "",
+			wantErr:          true,
+		},
+		{
+			name:             "invalid - empty string",
+			input:            "",
+			expectedService:  "Microsoft.Compute",
+			expectedResource: "virtualMachines",
+			wantRG:           "",
+			wantName:         "",
+			wantErr:          true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRG, gotName, err := splitId(tt.input, tt.expectedService, tt.expectedResource)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("splitId() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotRG != tt.wantRG {
+				t.Errorf("splitId() gotRG = %v, want %v", gotRG, tt.wantRG)
+			}
+			if gotName != tt.wantName {
+				t.Errorf("splitId() gotName = %v, want %v", gotName, tt.wantName)
+			}
+		})
+	}
+}
+
+func TestExtractResourceType(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:    "valid compute resource",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1",
+			want:    "virtualMachines",
+			wantErr: false,
+		},
+		{
+			name:    "valid compute resource different case",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/MICROSOFT.COMPUTE/virtualMachines/vm1",
+			want:    "virtualMachines",
+			wantErr: false,
+		},
+		{
+			name:    "valid with trailing slash",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1/",
+			want:    "virtualMachines",
+			wantErr: false,
+		},
+		{
+			name:    "different compute resource type",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/diskEncryptionSets/des1",
+			want:    "diskEncryptionSets",
+			wantErr: false,
+		},
+		{
+			name:    "non-compute resource",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+			want:    "",
+			wantErr: false,
+		},
+		{
+			name:    "malformed - missing provider",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/Microsoft.Compute/virtualMachines/vm1",
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name:    "malformed - missing resource type",
+			input:   "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute",
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name:    "empty string",
+			input:   "",
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name:    "too short",
+			input:   "/subscriptions/sub1",
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name:    "malformed structure",
+			input:   "/something/else/entirely",
+			want:    "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := extractResourceType(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("extractResourceType() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("extractResourceType() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateHostFromResource(t *testing.T) {
+	// Setup common test data
+	testNetwork := networkInfo{
+		IpAddresses: []string{"192.168.1.1", "192.168.1.2"},
+	}
+
+	// Use full Azure resource paths as keys
+	vmssPath := "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss1"
+	vmPath := "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm-resource1"
+
+	resourceToSetMap := map[string][]string{
+		vmssPath: {"set1", "set2"},
+		vmPath:   {"set3", "set4"},
+	}
+
+	tests := []struct {
+		name       string
+		resourceID string
+		network    networkInfo
+		setMap     map[string][]string
+		want       *pb.ListHostsResponseHost
+		wantErr    bool
+		errMessage string
+	}{
+		{
+			name:       "valid VMSS resource",
+			resourceID: vmssPath + "/virtualMachines/vm1",
+			network:    testNetwork,
+			setMap:     resourceToSetMap,
+			want: &pb.ListHostsResponseHost{
+				ExternalId:   vmssPath + "/virtualMachines/vm1",
+				ExternalName: "vmss1_vm1",
+				IpAddresses:  []string{"192.168.1.1", "192.168.1.2"},
+				SetIds:       []string{"set1", "set2"},
+			},
+			wantErr: false,
+		},
+		{
+			name:       "valid VM resource",
+			resourceID: vmPath,
+			network:    testNetwork,
+			setMap:     resourceToSetMap,
+			want: &pb.ListHostsResponseHost{
+				ExternalId:   vmPath,
+				ExternalName: "vm-resource1",
+				IpAddresses:  []string{"192.168.1.1", "192.168.1.2"},
+				SetIds:       []string{"set3", "set4"},
+			},
+			wantErr: false,
+		},
+		{
+			name:       "invalid resource ID",
+			resourceID: "invalid-resource-id",
+			network:    testNetwork,
+			setMap:     resourceToSetMap,
+			want:       nil,
+			wantErr:    true,
+			errMessage: "invalid resource ID",
+		},
+		{
+			name:       "unsupported resource type",
+			resourceID: "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/unsupportedResource/resource1",
+			network:    testNetwork,
+			setMap:     resourceToSetMap,
+			want:       nil,
+			wantErr:    true,
+			errMessage: "unsupported resource type",
+		},
+		{
+			name:       "VMSS with valid resource type but invalid structure",
+			resourceID: "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachineScaleSets", // Missing required segments after virtualMachineScaleSets
+			network:    testNetwork,
+			setMap:     resourceToSetMap,
+			want:       nil,
+			wantErr:    true,
+			errMessage: "could not determine set for resource ID: not a valid VMSS resource ID",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := createHostFromResource(tt.resourceID, tt.network, tt.setMap)
+
+			// Check error cases
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("createHostFromResource() expected error containing %q, got nil", tt.errMessage)
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errMessage) {
+					t.Errorf("createHostFromResource() error = %v, want error containing %q", err, tt.errMessage)
+				}
+				return
+			}
+
+			// Check non-error cases
+			if err != nil {
+				t.Errorf("createHostFromResource() unexpected error: %v", err)
+				return
+			}
+
+			// Compare the results
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("createHostFromResource() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

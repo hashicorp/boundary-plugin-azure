@@ -4,22 +4,30 @@
 package plugin
 
 const (
-	constBaseUrl                   = "base_url"
+	// Azure service constants
+	constMsComputeService = "Microsoft.Compute"
+	constMsNetworkService = "Microsoft.Network"
+	constSubscriptions    = "subscriptions"
+	constResourceGroups   = "resourceGroups"
+	constProviders        = "providers"
+
+	// Resource type constants
+	constVirtualMachinesResource         = "virtualMachines"
+	constVirtualMachineScaleSetsResource = "virtualMachineScaleSets"
+	constNetworkInterfacesResource       = "networkInterfaces"
+	constPublicIpAddressesResource       = "publicIPAddresses"
+
+	// Field constants
 	constFilter                    = "filter"
-	constSubscriptionId            = "subscription_id"
-	constClientId                  = "client_id"
+	constSecretId                  = "secret_id"
 	constSecretValue               = "secret_value"
 	constCredsLastRotatedTime      = "creds_last_rotated_time"
-	constSecretId                  = "secret_id"
-	constTenantId                  = "tenant_id"
-	constDefaultFilter             = "resourceType eq 'Microsoft.Compute/virtualMachines'"
-	constMsComputeService          = "Microsoft.Compute"
-	constVirtualMachinesResource   = "virtualMachines"
-	constMsNetworkService          = "Microsoft.Network"
-	constNetworkInterfacesResource = "networkInterfaces"
-	constPublicIpAddressesResource = "publicIPAddresses"
-	constSubscriptions             = "subscriptions"
-	constResourceGroups            = "resourceGroups"
-	constProviders                 = "providers"
 	constDisableCredentialRotation = "disable_credential_rotation"
+	constSubscriptionId            = "subscription_id"
+	constTenantId                  = "tenant_id"
+	constClientId                  = "client_id"
+	constBaseUrl                   = "base_url"
+
+	// Worker pool configuration
+	constDefaultWorkers = 1000
 )
