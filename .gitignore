@@ -16,3 +16,6 @@
 
 # Test credentials and other items
 /plugin/private*
+
+# vscode settings
+.vscode

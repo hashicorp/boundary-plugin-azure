@@ -1,6 +1,8 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MPL-2.0
 
+// Package plugin implements the Azure host plugin for Boundary,
+// providing functionality to manage and list Azure hosts.
 package plugin
 
 import (
@@ -8,17 +10,20 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/profiles/latest/compute/mgmt/compute"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/azure-sdk-for-go/profiles/latest/resources/mgmt/resources"
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostsets"
 	"github.com/mitchellh/mapstructure"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
+	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostsets"
 	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
 )
 
@@ -28,37 +33,19 @@ type AzurePlugin struct {
 }
 
 // Ensure that we are implementing HostPluginServiceServer
-var (
-	_ pb.HostPluginServiceServer = (*AzurePlugin)(nil)
-)
+var _ pb.HostPluginServiceServer = (*AzurePlugin)(nil)
 
 type SetAttributes struct {
 	Filter string `mapstructure:"filter"`
 }
 
-func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
-	authzInfo, err := getAuthorizationInfo(catalog)
-	if err != nil {
-		return nil, fmt.Errorf("error getting hauth config when creating catalog: %w", err)
-	}
-	newPass, err := rotateCredential(ctx, authzInfo)
-	if err != nil {
-		return nil, fmt.Errorf("error rotating credentials when creating catalog: %w", err)
-	}
-	if newPass == nil {
-		return nil, errors.New("new credential back from rotate is nil")
-	}
-	newSecrets, err := structpb.NewStruct(map[string]interface{}{
-		constSecretId:             *newPass.KeyId,
-		constSecretValue:          *newPass.SecretText,
-		constCredsLastRotatedTime: time.Now().Format(time.RFC3339Nano),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error formatting new credential data as struct")
-	}
-	return &pb.HostCatalogPersisted{
-		Secrets: newSecrets,
-	}, err
+type azureClients struct {
+	resClient    *resources.Client
+	vmClient     *compute.VirtualMachinesClient
+	vmssClient   *compute.VirtualMachineScaleSetsClient
+	vmssvmClient *compute.VirtualMachineScaleSetVMsClient
+	ifClient     *network.InterfacesClient
+	pipClient    *network.PublicIPAddressesClient
 }
 
 func (p *AzurePlugin) OnCreateCatalog(_ context.Context, req *pb.OnCreateCatalogRequest) (*pb.OnCreateCatalogResponse, error) {
@@ -94,13 +81,10 @@ func (p *AzurePlugin) OnUpdateCatalog(_ context.Context, req *pb.OnUpdateCatalog
 	}
 	currentCatalog := req.GetCurrentCatalog()
 	if currentCatalog == nil {
-		// Should never happen
 		return nil, status.Error(codes.FailedPrecondition, "current catalog is nil")
 	}
 	secrets := req.GetNewCatalog().GetSecrets()
 	if secrets == nil {
-		// If new secrets weren't passed in, don't rotate what we have on
-		// update.
 		return &pb.OnUpdateCatalogResponse{}, nil
 	}
 	if err := validateSecrets(secrets); err != nil {
@@ -142,10 +126,161 @@ func (p *AzurePlugin) OnUpdateSet(_ context.Context, req *pb.OnUpdateSetRequest)
 
 func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (*pb.ListHostsResponse, error) {
 	if len(req.GetSets()) == 0 {
-		// Nothing to fetch
 		return &pb.ListHostsResponse{}, nil
 	}
-	catalog := req.GetCatalog()
+
+	// Initialize Azure clients and authorization
+	clients, err := p.initializeAzureResources(req.GetCatalog(), req.GetPersisted().GetSecrets())
+	if err != nil {
+		return nil, err
+	}
+
+	// Find matching resources and map them to sets
+	vmResources, vmssResources, resourceToSetMap, err := p.findMatchingResources(ctx, req.GetSets(), clients.resClient)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create mutex and errgroup for parallel processing
+	mu := &sync.Mutex{}
+	vmToNetworkMap := make(map[string]networkInfo)
+	g, ctx := errgroup.WithContext(ctx)
+
+	// Process standard VMs in parallel if they exist
+	if len(vmResources) > 0 {
+		g.Go(func() error {
+			vmNetworkMap, err := p.processStandardVMs(ctx, vmResources, clients)
+			if err != nil {
+				return fmt.Errorf("processing VMs: %w", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for k, v := range vmNetworkMap {
+				vmToNetworkMap[k] = v
+			}
+			return nil
+		})
+	}
+
+	// Process VMSS in parallel if they exist
+	if len(vmssResources) > 0 {
+		g.Go(func() error {
+			vmssNetworkMap, err := p.processVMScaleSets(ctx, vmssResources, clients)
+			if err != nil {
+				return fmt.Errorf("processing VMSS: %w", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for k, v := range vmssNetworkMap {
+				vmToNetworkMap[k] = v
+			}
+			return nil
+		})
+	}
+
+	// Wait for all goroutines to complete and check for errors
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	response := buildHostsResponse(vmToNetworkMap, resourceToSetMap)
+	return response, nil
+}
+
+func rotateCredFromCallback(ctx context.Context, catalog *hostcatalogs.HostCatalog) (*pb.HostCatalogPersisted, error) {
+	authzInfo, err := getAuthorizationInfo(catalog)
+	if err != nil {
+		return nil, fmt.Errorf("error getting auth config when creating catalog: %w", err)
+	}
+	newPass, err := rotateCredential(ctx, authzInfo)
+	if err != nil {
+		return nil, fmt.Errorf("error rotating credentials when creating catalog: %w", err)
+	}
+	if newPass == nil {
+		return nil, errors.New("new credential back from rotate is nil")
+	}
+	newSecrets, err := structpb.NewStruct(map[string]interface{}{
+		constSecretId:             *newPass.KeyId,
+		constSecretValue:          *newPass.SecretText,
+		constCredsLastRotatedTime: time.Now().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error formatting new credential data as struct")
+	}
+	return &pb.HostCatalogPersisted{
+		Secrets: newSecrets,
+	}, err
+}
+
+func buildHostsResponse(
+	vmToNetworkMap map[string]networkInfo,
+	resourceToSetMap map[string][]string) *pb.ListHostsResponse {
+
+	ret := &pb.ListHostsResponse{}
+
+	for resourceID, networkInfo := range vmToNetworkMap {
+		host, err := createHostFromResource(resourceID, networkInfo, resourceToSetMap)
+		if err != nil {
+			fmt.Printf("Error creating host from resource: %v\n", err)
+			continue
+		}
+		ret.Hosts = append(ret.Hosts, host)
+	}
+
+	return ret
+}
+
+func createHostFromResource(resourceID string, networkInfo networkInfo,
+	resourceToSetMap map[string][]string) (*pb.ListHostsResponseHost, error) {
+
+	// Extract the resource type from the ID
+	resourceType, err := extractResourceType(resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid resource ID: %w", err)
+	}
+
+	switch resourceType {
+	case constVirtualMachineScaleSetsResource:
+		externalName, err := getExternalNameforVMSSInstance(resourceID)
+		if err != nil {
+			externalName = "" // Use empty name if there's an error
+		}
+
+		setId, err := getSetForVMSSInstance(resourceID)
+		if err != nil {
+			return nil, fmt.Errorf("could not determine set for resource ID: %w", err)
+		}
+		return &pb.ListHostsResponseHost{
+			ExternalId:   resourceID,
+			ExternalName: externalName,
+			IpAddresses:  networkInfo.IpAddresses,
+			SetIds:       resourceToSetMap[setId],
+		}, nil
+
+	case constVirtualMachinesResource:
+		_, externalName, err := splitId(resourceID, constMsComputeService, constVirtualMachinesResource)
+		if err != nil {
+			externalName = "" // Use empty name if there's an error
+		}
+
+		return &pb.ListHostsResponseHost{
+			ExternalId:   resourceID,
+			ExternalName: externalName,
+			IpAddresses:  networkInfo.IpAddresses,
+			SetIds:       resourceToSetMap[resourceID],
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType) // Return explicit error
+	}
+}
+
+func (p *AzurePlugin) initializeAzureResources(
+	catalog *hostcatalogs.HostCatalog,
+	secrets *structpb.Struct) (*azureClients, error) {
+
 	if catalog == nil {
 		return nil, status.Error(codes.FailedPrecondition, "catalog is nil")
 	}
@@ -154,8 +289,8 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		return nil, status.Error(codes.FailedPrecondition, "catalog has no attributes")
 	}
 
-	// Create an authorizer
-	catalog.Secrets = req.GetPersisted().GetSecrets()
+	// Create authorizer
+	catalog.Secrets = secrets
 	authzInfo, err := getAuthorizationInfo(catalog)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching authorizationInfo: %w", err)
@@ -163,6 +298,7 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 	if authzInfo == nil {
 		return nil, status.Error(codes.FailedPrecondition, "authorization info is nil")
 	}
+
 	authorizer, err := authzInfo.autorestAuthorizer()
 	if err != nil {
 		return nil, fmt.Errorf("error fetching autorest authorizer: %w", err)
@@ -171,16 +307,13 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		return nil, errors.New("fetched authorizer is nil")
 	}
 
-	commonOpts := make([]Option, 0, 3)
-	commonOpts = append(commonOpts,
+	// Set up common client options
+	commonOpts := []Option{
 		WithSubscriptionId(authzInfo.AuthParams.SubscriptionId),
 		WithAuthorizer(authorizer),
-	)
+	}
 
-	// Getting authorizer will fail if the attr fields are not populated, so
-	// it's safe to access directly at this point.
-	//
-	// TODO: plumb base URL everywhere, not just here
+	// Add base URL if specified
 	catalogAttrFields := catalogAttrs.GetFields()
 	if catalogAttrFields[constBaseUrl] != nil {
 		if baseUrl := catalogAttrFields[constBaseUrl].GetStringValue(); baseUrl != "" {
@@ -188,229 +321,137 @@ func (p *AzurePlugin) ListHosts(ctx context.Context, req *pb.ListHostsRequest) (
 		}
 	}
 
-	// Create clients
-	resClient, err := getResourcesClient(commonOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching resources client: %w", err)
-	}
-	if resClient == nil {
-		return nil, errors.New("resource client is nil")
-	}
-	vmClient, err := getVirtualMachinesClient(commonOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching virtual machines client: %w", err)
-	}
-	if vmClient == nil {
-		return nil, errors.New("virtual machines client is nil")
-	}
-	ifClient, err := getNetworkInterfacesClient(commonOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching network interfaces client: %w", err)
-	}
-	if ifClient == nil {
-		return nil, errors.New("network interfaces client is nil")
-	}
-	pipClient, err := getPublicIpAddressesClient(commonOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching public ip address client: %w", err)
-	}
-	if pipClient == nil {
-		return nil, errors.New("public ip address client is nil")
+	// Initialize clients
+	clients := &azureClients{}
+	var initErr error
+
+	// Initialize individual clients with error handling
+	if clients.resClient, initErr = getResourcesClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching resources client: %w", initErr)
 	}
 
-	// This next section finds resource IDs that match to the filter in each
-	// host set, and stores a mapping of, for each resource ID, which host sets
-	// it belongs to
-	resourceToSetMap := make(map[string][]string, len(req.GetSets())*10)
-	var resourceInfos []resources.GenericResourceExpanded
-	for _, set := range req.GetSets() {
-		if set == nil {
-			return nil, errors.New("set is nil")
-		}
-		setAttrs := set.GetAttributes()
-		if setAttrs == nil {
-			return nil, fmt.Errorf("set %s has no attributes", set.GetId())
-		}
-		setAttrFields := setAttrs.GetFields()
-		if len(setAttrFields) == 0 {
-			return nil, fmt.Errorf("set %s attributes has no filter", set.GetId())
-		}
-
-		filter := constDefaultFilter
-		if setAttrFields[constFilter] != nil {
-			if filter = setAttrFields[constFilter].GetStringValue(); filter == "" {
-				return nil, fmt.Errorf("set %s filter is empty", set.GetId())
-			}
-		}
-
-		// List values matching the filter; ask for provisioning state information
-		// to ensure we are seeing only fully provisioned machines
-		{
-			iter, err := resClient.ListComplete(ctx, filter, "", nil)
-			if err != nil {
-				return nil, fmt.Errorf("error listing resources: %w", err)
-			}
-			for iter.NotDone() {
-				val := iter.Value()
-				if err := iter.NextWithContext(ctx); err != nil {
-					return nil, fmt.Errorf("error iterating resources: %w", err)
-				}
-				if val.ID == nil { // something went wrong, likely iterator has advanced beyond the end
-					continue
-				}
-				if val.Type == nil || !strings.EqualFold(*val.Type, "Microsoft.Compute/virtualMachines") {
-					// no point continuing if we can't validate that it's a VM
-					continue
-				}
-				resourceInfos = append(resourceInfos, val)
-				resourceToSetMap[*val.ID] = append(resourceToSetMap[*val.ID], set.GetId())
-			}
-		}
+	if clients.vmClient, initErr = getVirtualMachinesClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching virtual machines client: %w", initErr)
 	}
 
-	// At this point we have a list of distinct resources and a mapping between
-	// them and the set(s) they belong to. Iterate through them and fetch
-	// information.
-	//
-	// Listing returns IDs which are basically URLs that have key-value
-	// pairs but not the individual components. Get requires the individual
-	// components, and won't accept the ID...
-	//
-	// Anyways, now we find VM details for those resources
-	vmToIfaceMap := make(map[string][]network.Interface)
-	{
-		for _, res := range resourceInfos {
-			resourceGroup, name, err := splitId(*res.ID, constMsComputeService, constVirtualMachinesResource)
-			if err != nil {
-				return nil, fmt.Errorf("error splitting vm id %q: %w", *res.ID, err)
-			}
-			vm, err := vmClient.Get(ctx, resourceGroup, name, "")
-			if err != nil {
-				return nil, fmt.Errorf("error fetching vm with id %q: %w", *res.ID, err)
-			}
-
-			iv, err := vmClient.InstanceView(ctx, resourceGroup, name)
-			if err != nil {
-				return nil, fmt.Errorf("error fetching instance view for vm with id %q: %w", *res.ID, err)
-			}
-			if iv.Statuses == nil {
-				return nil, fmt.Errorf("instance view statuses returned for vm with id %q is null", *res.ID)
-			}
-			var running bool
-			for _, s := range *iv.Statuses {
-				if s.Code == nil {
-					continue
-				}
-				state := strings.ToLower(*s.Code)
-				prefix := "powerstate/"
-				if !strings.HasPrefix(state, prefix) {
-					continue
-				}
-				state = strings.TrimPrefix(state, prefix)
-				if state == "running" {
-					running = true
-					break
-				}
-			}
-			if !running {
-				continue
-			}
-
-			props := vm.VirtualMachineProperties
-			if props == nil {
-				return nil, fmt.Errorf("error fetching properties for vm with id %q: %w", *res.ID, err)
-			}
-			if props.NetworkProfile == nil {
-				return nil, fmt.Errorf("error fetching network profile for vm with id %q", *res.ID)
-			}
-
-			// Within the VM, catalog the various interfaces
-			var ifaces []network.Interface
-			for _, ifaceRef := range *props.NetworkProfile.NetworkInterfaces {
-				if ifaceRef.ID == nil {
-					return nil, fmt.Errorf("nil ID for network interface for vm with id %q", *res.ID)
-				}
-				ifResGroup, ifName, err := splitId(*ifaceRef.ID, constMsNetworkService, constNetworkInterfacesResource)
-				if err != nil {
-					return nil, fmt.Errorf("error splitting network interface id %q: %w", *ifaceRef.ID, err)
-				}
-				iface, err := ifClient.Get(ctx, ifResGroup, ifName, "")
-				if err != nil {
-					return nil, fmt.Errorf("error fetching network interface with id %q: %w", *ifaceRef.ID, err)
-				}
-				if iface.InterfacePropertiesFormat == nil || iface.InterfacePropertiesFormat.IPConfigurations == nil {
-					continue
-				}
-				ifaces = append(ifaces, iface)
-			}
-			vmToIfaceMap[*res.ID] = ifaces
-		}
+	if clients.vmssClient, initErr = getVirtualMachineScaleSetsClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching virtual machine scale set client: %w", initErr)
 	}
 
-	// Now, fetch IP details for each of the interfaces for each VM
-	type networkInfo struct {
-		IpAddresses []string
-	}
-	vmToNetworkMap := make(map[string]networkInfo)
-	{
-		for vmId, ifaces := range vmToIfaceMap {
-			var netInfo networkInfo
-			for _, iface := range ifaces {
-				for _, ipconf := range *iface.InterfacePropertiesFormat.IPConfigurations {
-					if ipconf.PrivateIPAddress != nil {
-						netInfo.IpAddresses = append(netInfo.IpAddresses, *ipconf.PrivateIPAddress)
-					}
-					if ipconf.PublicIPAddress != nil {
-						if ipconf.PublicIPAddress.ID == nil {
-							return nil, fmt.Errorf("ip configuration %q has public IP address info but nil id", *ipconf.ID)
-						}
-						ipResGroup, ipName, err := splitId(*ipconf.PublicIPAddress.ID, constMsNetworkService, constPublicIpAddressesResource)
-						if err != nil {
-							return nil, fmt.Errorf("error splitting public ip address id %q: %w", *ipconf.PublicIPAddress.ID, err)
-						}
-						pipInfo, err := pipClient.Get(ctx, ipResGroup, ipName, "")
-						if err != nil {
-							if err != nil {
-								return nil, fmt.Errorf("error fetching public IP information with resource group %q and name %q: %w", ipResGroup, ipName, err)
-							}
-						}
-						if pipInfo.PublicIPAddressPropertiesFormat == nil {
-							return nil, fmt.Errorf("nil public ip address properties format for public ip %q", *ipconf.PublicIPAddress.ID)
-						}
-						if pipInfo.PublicIPAddressPropertiesFormat.IPAddress != nil {
-							netInfo.IpAddresses = append(netInfo.IpAddresses, *pipInfo.PublicIPAddressPropertiesFormat.IPAddress)
-						}
-					}
-				}
-			}
-			vmToNetworkMap[vmId] = netInfo
-		}
+	if clients.vmssvmClient, initErr = getVirtualMachineScaleSetVMsClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching virtual machine scale set vms client: %w", initErr)
 	}
 
-	ret := &pb.ListHostsResponse{}
-	for k, v := range vmToNetworkMap {
-		_, externalName, err := splitId(k, constMsComputeService, constVirtualMachinesResource)
-		if err != nil {
-			externalName = ""
-		}
-
-		host := &pb.ListHostsResponseHost{
-			ExternalId:   k,
-			ExternalName: externalName,
-			IpAddresses:  v.IpAddresses,
-			SetIds:       resourceToSetMap[k],
-		}
-		ret.Hosts = append(ret.Hosts, host)
+	if clients.ifClient, initErr = getNetworkInterfacesClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching network interfaces client: %w", initErr)
 	}
-	return ret, nil
+
+	if clients.pipClient, initErr = getPublicIpAddressesClient(commonOpts...); initErr != nil {
+		return nil, fmt.Errorf("error fetching public ip address client: %w", initErr)
+	}
+
+	return clients, nil
 }
 
+func (p *AzurePlugin) findMatchingResources(ctx context.Context,
+	sets []*hostsets.HostSet,
+	resClient *resources.Client) (
+	vmResources []resources.GenericResourceExpanded,
+	vmssResources []resources.GenericResourceExpanded,
+	resourceToSetMap map[string][]string,
+	_ error) {
+
+	resourceToSetMap = make(map[string][]string, len(sets)*10) // Pre-allocate map size
+
+	for _, set := range sets {
+		if err := validateHostSet(set); err != nil {
+			return nil, nil, nil, err
+		}
+
+		filter := getSetFilter(set)
+		setVMResources, setVMSSResources, setResourceToSetMap, err := listAndFilterResources(ctx, resClient, filter, set.GetId())
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		vmResources = append(vmResources, setVMResources...)
+		vmssResources = append(vmssResources, setVMSSResources...)
+		for k, v := range setResourceToSetMap {
+			resourceToSetMap[k] = append(resourceToSetMap[k], v...)
+		}
+	}
+
+	return vmResources, vmssResources, resourceToSetMap, nil
+}
+
+func listAndFilterResources(ctx context.Context,
+	resClient *resources.Client,
+	filter, setID string) (
+	vmResources []resources.GenericResourceExpanded,
+	vmssResources []resources.GenericResourceExpanded,
+	resourceToSetMap map[string][]string,
+	_ error) {
+
+	resourceToSetMap = make(map[string][]string)
+	iter, err := resClient.ListComplete(ctx, filter, "", nil)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("error listing resources: %w", err)
+	}
+
+	for iter.NotDone() {
+		val := iter.Value()
+		if err := iter.NextWithContext(ctx); err != nil {
+			return nil, nil, nil, fmt.Errorf("error iterating resources: %w", err)
+		}
+
+		if val.ID == nil || val.Type == nil {
+			continue
+		}
+		virtualMachineType := constMsComputeService + "/" + constVirtualMachinesResource
+		virtualMachineScaleSetType := constMsComputeService + "/" + constVirtualMachineScaleSetsResource
+		if strings.EqualFold(*val.Type, virtualMachineType) {
+			vmResources = append(vmResources, val)
+			resourceToSetMap[*val.ID] = append(resourceToSetMap[*val.ID], setID)
+		} else if strings.EqualFold(*val.Type, virtualMachineScaleSetType) {
+			vmssResources = append(vmssResources, val)
+			resourceToSetMap[*val.ID] = append(resourceToSetMap[*val.ID], setID)
+		}
+	}
+
+	return vmResources, vmssResources, resourceToSetMap, nil
+}
+
+// Resource Filter Management
+func getSetFilter(set *hostsets.HostSet) string {
+	setAttrFields := set.GetAttributes().GetFields()
+	if setAttrFields[constFilter] != nil {
+		if filter := setAttrFields[constFilter].GetStringValue(); filter != "" {
+			return filter
+		}
+	}
+	return ""
+}
+
+func validateHostSet(set *hostsets.HostSet) error {
+	if set == nil {
+		return errors.New("set is nil")
+	}
+	setAttrs := set.GetAttributes()
+	if setAttrs == nil {
+		return fmt.Errorf("set %s has no attributes", set.GetId())
+	}
+	if len(setAttrs.GetFields()) == 0 {
+		return fmt.Errorf("set %s attributes has no filter", set.GetId())
+	}
+	return nil
+}
+
+// ID Parsing Functions
 func splitId(in, expectedService, expectedResource string) (string, string, error) {
 	// Note: this could be stolen from the helpers directory in the TF AzureRM
 	// provider but I'm not at the moment because it does a bunch of trickery
-	// for some Azure APIs and we have a much more limited scope. I may come to
-	// regret this.
+	// for some Azure APIs and we have a much more limited scope.
 	splitId := strings.Split(strings.TrimLeft(in, "/"), "/")
+
 	// Run through some sanity checks
 	if len(splitId) != 8 ||
 		!strings.EqualFold(splitId[0], constSubscriptions) ||
@@ -423,47 +464,39 @@ func splitId(in, expectedService, expectedResource string) (string, string, erro
 	return splitId[3], splitId[7], nil
 }
 
-// Returns an invalid argument error with the problematic fields included
-// in the error message.
-func invalidArgumentError(msg string, f map[string]string) error {
-	var fieldMsgs []string
-	for field, val := range f {
-		fieldMsgs = append(fieldMsgs, fmt.Sprintf("%q: %q", field, val))
+func extractResourceType(resourceID string) (string, error) {
+	if resourceID == "" {
+		return "", fmt.Errorf("empty resource ID provided")
 	}
-	if len(fieldMsgs) > 0 {
-		msg = fmt.Sprintf("%s: [%s]", msg, strings.Join(fieldMsgs, ", "))
+
+	parts := strings.Split(strings.TrimLeft(resourceID, "/"), "/")
+
+	// Validate minimum length and basic structure
+	if len(parts) < 6 {
+		return "", fmt.Errorf("resource ID too short: %s", resourceID)
 	}
-	return status.Error(codes.InvalidArgument, msg)
+
+	// Check for required segments in correct positions
+	if !strings.EqualFold(parts[0], constSubscriptions) ||
+		!strings.EqualFold(parts[2], constResourceGroups) ||
+		!strings.EqualFold(parts[4], constProviders) {
+		return "", fmt.Errorf("malformed resource ID, missing required segments: %s", resourceID)
+	}
+
+	// Check for Microsoft.Compute in correct position
+	if !strings.EqualFold(parts[5], constMsComputeService) {
+		return "", nil // Not a compute resource, return empty string without error
+	}
+
+	// Ensure there's a resource type after Microsoft.Compute
+	if len(parts) < 7 {
+		return "", fmt.Errorf("no resource type found after Microsoft.Compute: %s", resourceID)
+	}
+
+	return parts[6], nil
 }
 
-func validateSecrets(s *structpb.Struct) error {
-	if s == nil {
-		return status.Error(codes.InvalidArgument, "Secrets not provided but are required")
-	}
-	var secrets SecretData
-	if err := mapstructure.Decode(s.AsMap(), &secrets); err != nil {
-		return status.Errorf(codes.InvalidArgument, "error decoding catalog secrets: %s", err)
-	}
-	badFields := make(map[string]string)
-	if len(secrets.SecretValue) == 0 {
-		badFields["secrets.secret_value"] = "This field is required."
-	}
-	if len(secrets.CredsLastRotatedTime) != 0 {
-		badFields["secrets.creds_last_rotated_time"] = "This field is reserved and cannot be set."
-	}
-	if len(badFields) > 0 {
-		return invalidArgumentError("Error in the secrets provided", badFields)
-	}
-	return nil
-}
-
-var allowedCatalogFields = map[string]struct{}{
-	constDisableCredentialRotation: {},
-	constSubscriptionId:            {},
-	constTenantId:                  {},
-	constClientId:                  {},
-}
-
+// Validation Functions
 func validateCatalog(c *hostcatalogs.HostCatalog) error {
 	if c == nil {
 		return status.Error(codes.InvalidArgument, "catalog is nil")
@@ -473,6 +506,7 @@ func validateCatalog(c *hostcatalogs.HostCatalog) error {
 	if err := mapstructure.Decode(attrMap, &attrs); err != nil {
 		return status.Errorf(codes.InvalidArgument, "error decoding catalog attributes: %s", err)
 	}
+
 	badFields := make(map[string]string)
 	if !attrs.DisableCredentialRotation {
 		badFields["attributes.disable_credential_rotation"] = "This field must be set to true."
@@ -499,8 +533,26 @@ func validateCatalog(c *hostcatalogs.HostCatalog) error {
 	return nil
 }
 
-var allowedSetFields = map[string]struct{}{
-	constFilter: {},
+func validateSecrets(s *structpb.Struct) error {
+	if s == nil {
+		return status.Error(codes.InvalidArgument, "Secrets not provided but are required")
+	}
+	var secrets SecretData
+	if err := mapstructure.Decode(s.AsMap(), &secrets); err != nil {
+		return status.Errorf(codes.InvalidArgument, "error decoding catalog secrets: %s", err)
+	}
+
+	badFields := make(map[string]string)
+	if len(secrets.SecretValue) == 0 {
+		badFields["secrets.secret_value"] = "This field is required."
+	}
+	if len(secrets.CredsLastRotatedTime) != 0 {
+		badFields["secrets.creds_last_rotated_time"] = "This field is reserved and cannot be set."
+	}
+	if len(badFields) > 0 {
+		return invalidArgumentError("Error in the secrets provided", badFields)
+	}
+	return nil
 }
 
 func validateSet(s *hostsets.HostSet) error {
@@ -512,6 +564,7 @@ func validateSet(s *hostsets.HostSet) error {
 	if err := mapstructure.Decode(attrMap, &attrs); err != nil {
 		return status.Errorf(codes.InvalidArgument, "error decoding set attributes: %s", err)
 	}
+
 	badFields := make(map[string]string)
 	if _, ok := attrMap[constFilter]; ok && len(attrs.Filter) == 0 {
 		badFields["attributes.filter"] = "This field must be not empty."
@@ -527,4 +580,28 @@ func validateSet(s *hostsets.HostSet) error {
 		return invalidArgumentError("Invalid arguments in the new set", badFields)
 	}
 	return nil
+}
+
+// Error Handling Functions
+func invalidArgumentError(msg string, f map[string]string) error {
+	var fieldMsgs []string
+	for field, val := range f {
+		fieldMsgs = append(fieldMsgs, fmt.Sprintf("%q: %q", field, val))
+	}
+	if len(fieldMsgs) > 0 {
+		msg = fmt.Sprintf("%s: [%s]", msg, strings.Join(fieldMsgs, ", "))
+	}
+	return status.Error(codes.InvalidArgument, msg)
+}
+
+// Map Definitions for Allowed Fields
+var allowedCatalogFields = map[string]struct{}{
+	constDisableCredentialRotation: {},
+	constSubscriptionId:            {},
+	constTenantId:                  {},
+	constClientId:                  {},
+}
+
+var allowedSetFields = map[string]struct{}{
+	constFilter: {},
 }

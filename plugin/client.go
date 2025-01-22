@@ -65,6 +65,56 @@ func getVirtualMachinesClient(opt ...Option) (*compute.VirtualMachinesClient, er
 	return &client, nil
 }
 
+func getVirtualMachineScaleSetsClient(opt ...Option) (*compute.VirtualMachineScaleSetsClient, error) {
+	opts, err := getOpts(opt...)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing ops: %w", err)
+	}
+	if opts.withSubscriptionId == "" {
+		return nil, errors.New("subscription id is empty")
+	}
+	if opts.withAuthorizer == nil {
+		return nil, errors.New("authorizer is nil")
+	}
+	var client compute.VirtualMachineScaleSetsClient
+	switch opts.withBaseUrl {
+	case "":
+		client = compute.NewVirtualMachineScaleSetsClient(opts.withSubscriptionId)
+	default:
+		client = compute.NewVirtualMachineScaleSetsClientWithBaseURI(opts.withBaseUrl, opts.withSubscriptionId)
+	}
+	client.Authorizer = opts.withAuthorizer
+	if err := client.AddToUserAgent(opts.withUserAgent); err != nil {
+		return nil, fmt.Errorf("error adding identifier to user-agent: %w", err)
+	}
+	return &client, nil
+}
+
+func getVirtualMachineScaleSetVMsClient(opt ...Option) (*compute.VirtualMachineScaleSetVMsClient, error) {
+	opts, err := getOpts(opt...)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing ops: %w", err)
+	}
+	if opts.withSubscriptionId == "" {
+		return nil, errors.New("subscription id is empty")
+	}
+	if opts.withAuthorizer == nil {
+		return nil, errors.New("authorizer is nil")
+	}
+	var client compute.VirtualMachineScaleSetVMsClient
+	switch opts.withBaseUrl {
+	case "":
+		client = compute.NewVirtualMachineScaleSetVMsClient(opts.withSubscriptionId)
+	default:
+		client = compute.NewVirtualMachineScaleSetVMsClientWithBaseURI(opts.withBaseUrl, opts.withSubscriptionId)
+	}
+	client.Authorizer = opts.withAuthorizer
+	if err := client.AddToUserAgent(opts.withUserAgent); err != nil {
+		return nil, fmt.Errorf("error adding identifier to user-agent: %w", err)
+	}
+	return &client, nil
+}
+
 func getNetworkInterfacesClient(opt ...Option) (*network.InterfacesClient, error) {
 	opts, err := getOpts(opt...)
 	if err != nil {
