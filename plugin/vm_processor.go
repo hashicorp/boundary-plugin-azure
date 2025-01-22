@@ -104,7 +104,11 @@ func isVMRunning(
 	ctx context.Context,
 	vmClient *compute.VirtualMachinesClient,
 	resourceGroup,
-	name string) (bool, error) {
+	name string,
+) (
+	bool,
+	error,
+) {
 
 	iv, err := vmClient.InstanceView(ctx, resourceGroup, name)
 	if err != nil {

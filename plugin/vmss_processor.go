@@ -28,7 +28,11 @@ type vmssInstanceJob struct {
 func (p *AzurePlugin) processVMScaleSets(
 	ctx context.Context,
 	resourceInfos []resources.GenericResourceExpanded,
-	clients *azureClients) (map[string]networkInfo, error) {
+	clients *azureClients,
+) (
+	map[string]networkInfo,
+	error,
+) {
 
 	// Initialize the map that we'll return
 	vmToNetworkMap := make(map[string]networkInfo)
@@ -108,7 +112,8 @@ func processVMSSInstancesParallel(
 	vmss compute.VirtualMachineScaleSet,
 	resourceGroup string,
 	clients *azureClients,
-	vmToNetworkMap map[string]networkInfo) error {
+	vmToNetworkMap map[string]networkInfo,
+) error {
 
 	if vmss.Name == nil {
 		return fmt.Errorf("vmss name is nil")
@@ -176,7 +181,8 @@ func processVMSSInstanceParallel(
 	vmssName string,
 	clients *azureClients,
 	vmToNetworkMap map[string]networkInfo,
-	mu *sync.Mutex) error {
+	mu *sync.Mutex,
+) error {
 
 	if vmssvm.InstanceID == nil {
 		return fmt.Errorf("instance ID is nil")
@@ -211,7 +217,11 @@ func isVMSSInstanceRunning(
 	vmssvmClient *compute.VirtualMachineScaleSetVMsClient,
 	resourceGroup,
 	vmssName string,
-	instanceID *string) (bool, error) {
+	instanceID *string,
+) (
+	bool,
+	error,
+) {
 
 	if instanceID == nil {
 		return false, fmt.Errorf("instance ID is nil")

@@ -38,7 +38,8 @@ func processNetworkProfile(
 	ctx context.Context,
 	interfaces []compute.NetworkInterfaceReference,
 	processor networkProcessor,
-	targetInfo *networkInfo) error {
+	targetInfo *networkInfo,
+) error {
 
 	for _, ifaceRef := range interfaces {
 		if ifaceRef.ID == nil {
@@ -80,7 +81,11 @@ func (p *vmNetworkProcessor) getNetworkInterface(ctx context.Context, interfaceI
 func (p *vmNetworkProcessor) processIPConfigurations(
 	ctx context.Context,
 	ipConfigs []network.InterfaceIPConfiguration,
-	ifName string) (*networkInfo, error) {
+	ifName string,
+) (
+	*networkInfo,
+	error,
+) {
 	tempInfo := &networkInfo{}
 	for _, ipconf := range ipConfigs {
 		// Process private IP
@@ -104,7 +109,11 @@ func (p *vmNetworkProcessor) getPublicIPAddress(
 	ctx context.Context,
 	publicIP *network.PublicIPAddress,
 	ipConf *network.InterfaceIPConfiguration,
-	ifName string) (string, error) {
+	ifName string,
+) (
+	string,
+	error,
+) {
 	if publicIP.ID == nil {
 		return "", fmt.Errorf("ip configuration has public IP address info but nil id")
 	}
@@ -150,7 +159,11 @@ func (p *vmssNetworkProcessor) getNetworkInterface(ctx context.Context, interfac
 func (p *vmssNetworkProcessor) processIPConfigurations(
 	ctx context.Context,
 	ipConfigs []network.InterfaceIPConfiguration,
-	ifName string) (*networkInfo, error) {
+	ifName string,
+) (
+	*networkInfo,
+	error,
+) {
 	tempInfo := &networkInfo{}
 	for _, ipconf := range ipConfigs {
 		if ipconf.PrivateIPAddress != nil {
@@ -172,7 +185,11 @@ func (p *vmssNetworkProcessor) getPublicIPAddress(
 	ctx context.Context,
 	publicIP *network.PublicIPAddress,
 	ipConf *network.InterfaceIPConfiguration,
-	ifName string) (string, error) {
+	ifName string,
+) (
+	string,
+	error,
+) {
 	if publicIP == nil || publicIP.ID == nil || ipConf.Name == nil {
 		return "", fmt.Errorf("invalid public IP configuration")
 	}
@@ -207,7 +224,8 @@ func processVMNetworkInterfaces(
 	vm compute.VirtualMachine,
 	clients *azureClients,
 	resourceGroup string,
-	netInfo *networkInfo) error {
+	netInfo *networkInfo,
+) error {
 
 	if vm.VirtualMachineProperties == nil || vm.VirtualMachineProperties.NetworkProfile == nil {
 		return fmt.Errorf("error fetching network profile")
@@ -226,7 +244,8 @@ func processVMSSNetworkInterfaces(
 	vmssvm compute.VirtualMachineScaleSetVM,
 	resourceGroup, vmssName string,
 	clients *azureClients,
-	netInfo *networkInfo) error {
+	netInfo *networkInfo,
+) error {
 
 	if vmssvm.VirtualMachineScaleSetVMProperties == nil ||
 		vmssvm.VirtualMachineScaleSetVMProperties.NetworkProfile == nil {
