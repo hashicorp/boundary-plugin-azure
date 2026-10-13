@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostsets"
-	pb "github.com/hashicorp/boundary/sdk/pbs/plugin"
+	"github.com/hashicorp/boundary-sdk/sdk/pbs/controller/api/resources/hostcatalogs"
+	"github.com/hashicorp/boundary-sdk/sdk/pbs/controller/api/resources/hostsets"
+	pb "github.com/hashicorp/boundary-sdk/sdk/pbs/plugin"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/kr/pretty"
 	"github.com/manicminer/hamilton/auth"
