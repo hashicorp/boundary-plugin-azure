@@ -11,7 +11,7 @@ import (
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
-	"github.com/hashicorp/boundary/sdk/pbs/controller/api/resources/hostcatalogs"
+	"github.com/hashicorp/boundary-sdk/sdk/pbs/controller/api/resources/hostcatalogs"
 	hauth "github.com/manicminer/hamilton/auth"
 	"github.com/manicminer/hamilton/environments"
 	"github.com/manicminer/hamilton/msgraph"
