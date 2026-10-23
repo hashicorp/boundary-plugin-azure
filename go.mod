@@ -1,6 +1,6 @@
 module github.com/hashicorp/boundary-plugin-azure
 
-go 1.26.7
+go 1.26.10
 
 require (
 	github.com/Azure/azure-sdk-for-go v66.0.0+incompatible
