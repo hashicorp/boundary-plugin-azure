@@ -6,7 +6,7 @@ require (
 	github.com/Azure/azure-sdk-for-go v66.0.0+incompatible
 	github.com/Azure/go-autorest/autorest v0.11.28
 	github.com/Azure/go-autorest/autorest/azure/auth v0.5.11
-	github.com/hashicorp/boundary-sdk/sdk v0.1.5
+	github.com/hashicorp/boundary-sdk/sdk v0.1.6
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.2.0
 	github.com/kr/pretty v0.3.0
 	github.com/manicminer/hamilton v0.46.0
